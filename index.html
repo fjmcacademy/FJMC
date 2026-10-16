@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FJMC Academy OMR Pro</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<header class="top"><div class="logo">FJ</div><div class="brand"><b>FJMC Academy</b><span>OMR Pro · Exam & Evaluation Studio</span></div><span class="tag">Standalone workspace</span></header>
+<div class="layout">
+<aside class="sidebar">
+<button class="nav active" data-tab="dashboard">▦ Dashboard</button><button class="nav" data-tab="paper">▤ Exam & Answer Key</button><button class="nav" data-tab="scan">◎ Scan OMR</button><button class="nav" data-tab="results">☷ Results</button><button class="nav" data-tab="settings">⚙ Data & Setup</button>
+<div class="aside-note"><b>Separate from your main site</b><p>This app runs independently. Prototype data stays in this browser.</p></div></aside>
+<main>
+<section class="tab active" id="tab-dashboard"><div class="heading"><div><small>OVERVIEW</small><h1>OMR Dashboard</h1><p>Build exams, print answer sheets, scan student responses and score them.</p></div><button class="primary" data-open="paper">+ New exam</button></div>
+<div class="stats"><div><span>Exams</span><b id="nExams">0</b></div><div><span>Scanned students</span><b id="nScans">0</b></div><div><span>Average score</span><b id="avg">—</b></div></div>
+<div class="panel"><h2>Recent exams</h2><div id="recent" class="empty">No exams created yet.</div></div>
+<div class="callout"><b>Best results come from a standard scan.</b><p>Print at 100% scale, keep all corner markers visible, and scan flat from directly above. The scanner reads the generated template layout and asks for review when detection is uncertain.</p></div>
+</section>
+<section class="tab" id="tab-paper"><div class="heading"><div><small>EXAM BUILDER</small><h1>Exam & Answer Key</h1><p>Create an MCQ or MSQ paper, or upload a PDF as reference.</p></div></div>
+<div class="panel"><h2>Exam details</h2><form id="examForm" class="grid">
+<label class="wide">Exam name *<input id="examName" required placeholder="CSIR NET Mathematical Sciences Mock Test"></label>
+<label>Exam date *<input id="examDate" type="date" required></label><label>Exam paper ID *<input id="paperId" required placeholder="FJMC-MATH-001"></label>
+<label>Subject / course<input id="subject" placeholder="Mathematical Sciences"></label><label>Batch / class<input id="batch" placeholder="Batch 1"></label>
+<label>Questions<select id="count"><option>25</option><option>50</option><option>75</option><option selected>100</option><option>125</option><option>150</option><option>175</option><option>200</option></select></label>
+<label>Default question type<select id="defaultType"><option value="MCQ">MCQ — one correct option</option><option value="MSQ">MSQ — multiple correct options</option></select></label>
+<label>Correct marks<input id="positive" type="number" step="0.25" value="2" min="0" required></label><label>Wrong answer marks<input id="negative" type="number" step="0.25" value="0.5" min="0" required></label>
+<label class="wide">Question paper / solutions PDF (optional)<input id="pdf" type="file" accept="application/pdf"><small>For this version, the PDF is stored as local metadata only; questions and key are entered/verified below. Automatic PDF extraction is not assumed to be accurate.</small></label>
+<div class="wide"><button class="primary">Create exam & edit key</button></div></form></div>
+<div class="panel" id="keyPanel" hidden><div class="panel-head"><div><h2 id="keyTitle">Answer key editor</h2><p>MCQ = exactly one correct option. MSQ = select every correct option.</p></div><button class="primary" id="saveKey">Save exam & key</button></div><div class="toolbar"><button class="secondary" id="allMCQ">Set all MCQ</button><button class="secondary" id="allMSQ">Set all MSQ</button><button class="secondary" id="printSheet">Print blank student OMR</button><button class="secondary" id="exportKey">Export key JSON</button></div><div id="keyGrid" class="key-grid"></div></div>
+<div class="panel"><h2>Saved exams</h2><div id="examList" class="empty">No exams yet.</div></div>
+</section>
+<section class="tab" id="tab-scan"><div class="heading"><div><small>STUDENT RESPONSE CAPTURE</small><h1>Scan OMR</h1><p>Upload a flat scan/photo of the printed FJMC template. Student responses are captured separately from the answer key.</p></div></div>
+<div class="panel"><form id="scanForm" class="grid">
+<label class="wide">Exam paper<select id="scanExam" required></select></label>
+<label>Student name *<input id="studentName" required placeholder="Full name"></label><label>Roll number *<input id="roll" required placeholder="FJMC20261001"></label>
+<label>Exam date<input id="scanDate" type="date"></label><label>Exam paper ID<input id="scanPaperId" readonly></label>
+<label class="wide">Upload OMR image (phone camera or scanner image) *<input id="scanImage" type="file" accept="image/*" capture="environment" required><small>Automatic reading works best with a straight, full-page scan of the generated template. Skewed photos may need manual confirmation.</small></label>
+<div class="wide"><button class="primary">Read student answers</button></div></form>
+<div id="scanStatus" class="status" hidden></div><div id="scanPreviewWrap" hidden><img id="scanPreview" alt="Uploaded OMR preview"></div></div>
+<div class="panel" id="reviewPanel" hidden><div class="panel-head"><div><h2>Detected student answers</h2><p>These answers come from the uploaded image, not from the answer key. Review and correct any uncertain detections.</p></div><button class="primary" id="evaluate">Evaluate & save result</button></div><div id="responseGrid" class="key-grid"></div></div>
+<div class="panel"><h2>Machine scanner import</h2><p>For an OMR machine, use exported CSV with columns <code>examPaperId,studentName,rollNumber,answers</code>. The answers field can be a string like <code>ACBD</code> for MCQ or comma-separated selections like <code>A|C,B|D,A</code> for MSQ. Machine-specific proprietary formats need a model-specific adapter.</p><input id="machineCsv" type="file" accept=".csv,text/csv"><button class="secondary" id="importCsv">Import scanner CSV</button></div>
+</section>
+<section class="tab" id="tab-results"><div class="heading"><div><small>MARKING & REPORTS</small><h1>Results</h1><p>Marks, MCQ/MSQ comparison, student details and exports.</p></div><button class="secondary" id="exportResults">Export CSV</button></div><div class="panel"><div id="results" class="empty">No results yet.</div></div></section>
+<section class="tab" id="tab-settings"><div class="heading"><div><small>CONFIGURATION</small><h1>Data & Setup</h1></div></div><div class="panel"><h2>Local data and backup</h2><p>Current version stores exams and results in this browser's local storage. It does not sync between phones or computers.</p><button class="primary" id="backup">Download JSON backup</button> <button class="danger" id="clear">Clear all local data</button></div><div class="panel"><h2>Before production use</h2><ul><li>Add secure login and roles.</li><li>Use Firebase or another backend with access rules for shared data.</li><li>Validate the automatic OMR reader with actual printed sheets and scanner samples.</li><li>PDF parsing/OCR and direct USB machine control require additional components.</li></ul><p><b>Privacy:</b> use sample data only on shared/public computers.</p></div></section>
+</main></div><div id="toast"></div><script src="app.js"></script></body></html>
