@@ -32,7 +32,8 @@
   <div class="panel">
     <h2>Create a paper</h2>
     <form id="paperForm" class="form-grid">
-      <label class="span2">Paper title<input id="paperTitle" required placeholder="e.g. CSIR NET Real Analysis Mock Test"></label>
+      <label>Paper ID / Paper Code<input id="paperCode" placeholder="e.g. CSIRNET-RA-01"></label>
+      <label>Paper title<input id="paperTitle" required placeholder="e.g. CSIR NET Real Analysis Mock Test"></label>
       <label>Exam / course<input id="paperExam" placeholder="CSIR NET"></label>
       <label>Batch<input id="paperBatch" placeholder="Batch 1"></label>
       <label>Number of questions<select id="questionCount"><option>25</option><option>50</option><option>75</option><option selected>100</option><option>125</option><option>150</option><option>175</option><option>200</option></select></label>
@@ -50,22 +51,23 @@
   <div class="panel"><div class="panel-head"><div><h2>Saved papers</h2><p class="muted">Select a paper to edit its answer key or print sheets.</p></div></div><div id="paperList" class="empty">No saved papers yet.</div></div>
 </section>
 <section class="view" id="view-scan">
-  <div class="page-heading"><div><p class="eyebrow">RESPONSE CAPTURE</p><h1>Scan OMR sheets</h1><p class="muted">Use phone camera, upload a photo, or import exported files from a compatible OMR scanner.</p></div></div>
+  <div class="page-heading"><div><p class="eyebrow">RESPONSE CAPTURE</p><h1>Scan OMR sheets</h1><p class="muted">Upload a completed sheet for preview, then verify answers in the review grid before evaluation.</p></div></div>
   <div class="panel">
     <form id="scanForm" class="form-grid">
       <label class="span2">Choose exam paper<select id="scanPaper" required><option value="">Create a paper first</option></select></label>
-      <label>Student ID / roll number<input id="studentId" required placeholder="e.g. FJMC-001"></label>
-      <label>Student name (optional)<input id="studentName" placeholder="Student name"></label>
+      <label>Student roll number / ID<input id="studentId" required placeholder="e.g. FJMC-001"></label>
+      <label>Student name<input id="studentName" required placeholder="Full student name"></label>
       <label class="span2">Upload sheet image or scanner-exported image<input id="omrImage" type="file" accept="image/*" capture="environment"></label>
       <label class="span2">Bulk scanner import (CSV with columns studentId,studentName,answers; answers like ABCD... or comma-separated)<input id="bulkFile" type="file" accept=".csv,text/csv"></label>
       <div class="span2"><button class="primary" type="submit">Open answer review</button></div>
     </form>
-    <div id="imageReview" class="image-review" hidden><img id="previewImage" alt="Uploaded OMR sheet preview"><div><strong>Image loaded</strong><p class="muted">For this starter, confirm the detected answers in the review grid below. The image is not automatically graded from arbitrary camera angles.</p></div></div>
+    <div id="imageReview" class="image-review" hidden><img id="previewImage" alt="Uploaded OMR sheet preview"><div><strong>Image loaded</strong><p class="muted">Important: this version previews the image but does not yet read bubbles automatically. Confirm each answer in the review grid; the app will not guess answers from the photo.</p></div></div>
   </div>
   <div class="panel" id="responseEditor" hidden>
     <div class="panel-head"><div><h2>Review student answers</h2><p class="muted">Verify every response before saving the result.</p></div><button id="saveResponse" class="primary">Evaluate & save result</button></div>
     <div id="responseGrid" class="answer-grid"></div>
   </div>
+  <div class="panel"><h2>How answer reading works</h2><p class="muted">The uploaded photo is currently a reference image only. Bubble recognition needs calibrated image processing for this exact printed layout and camera angle. This build preserves answers you already selected when you reopen the review for the same paper, instead of resetting them to blank.</p></div>
   <div class="panel"><h2>Machine compatibility</h2><p class="muted">This web app can import scanner-exported images and CSV response files. Direct USB/serial control and proprietary scanner formats require the exact manufacturer/model, driver and output specification.</p></div>
 </section>
 <section class="view" id="view-results">

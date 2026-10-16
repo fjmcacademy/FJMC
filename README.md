@@ -4,7 +4,7 @@
 - Separate static website (does not modify the existing FJMC Academy site).
 - Create papers with 25–200 questions and positive/negative marking.
 - Manually create and export answer keys.
-- Print an A4 OMR answer-sheet template.
+- Print an A4 OMR answer-sheet template with student name, roll number/ID, exam name, paper ID, batch, date, signature and booklet set fields.
 - Upload an OMR photo from a phone or desktop and review answers manually.
 - Import bulk scanner-exported CSV rows (`studentId,studentName,answers`).
 - Evaluate scores, show results, print an individual report, export CSV and backup JSON.
