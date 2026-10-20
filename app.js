@@ -14,5 +14,15 @@ $("evaluateBtn").onclick=()=>{const cm=Number($("correctMarks").value),nm=Number
 $("clearResponses").onclick=()=>{responses={};renderResponses();$("result").classList.add("hidden");lastResult=null};
 $("downloadCsv").onclick=()=>{if(!lastResult){alert("Calculate the result first.");return}const r=lastResult,rows=[["Test","Student Name","Roll Number","Correct","Wrong","Blank","Score","Maximum Marks","Percentage"],[r.test,r.name,r.roll,r.correct,r.wrong,r.blank,r.score.toFixed(2),r.max.toFixed(2),r.percentage.toFixed(2)]],csv=rows.map(row=>row.map(v=>`"${String(v??"").replace(/"/g,'""')}"`).join(",")).join("\r\n"),url=URL.createObjectURL(new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"})),a=document.createElement("a");a.href=url;a.download="fjmc-omr-result.csv";a.click();URL.revokeObjectURL(url)};
 $("printResult").onclick=()=>{if(!lastResult){alert("Calculate result first.");return}window.print()};
-$("omrPhoto").onchange=e=>{const f=e.target.files?.[0];if(!f)return;if(!f.type.startsWith("image/")){alert("Select an image file.");return}const url=URL.createObjectURL(f);$("photoPreview").src=url;$("photoPreview").classList.remove("hidden")};
+function previewSelectedImage(input){
+  const f=input.files && input.files[0];
+  if(!f)return;
+  if(!f.type.startsWith("image/")){alert("Please choose an image file (JPG, PNG, or WebP).");input.value="";return;}
+  const url=URL.createObjectURL(f);
+  $("photoPreview").src=url;
+  $("photoPreview").classList.remove("hidden");
+  $("photoPreview").dataset.objectUrl=url;
+}
+$("omrPhoto").addEventListener("change",e=>previewSelectedImage(e.target));
+$("omrCamera").addEventListener("change",e=>previewSelectedImage(e.target));
 $("year").textContent=new Date().getFullYear();load();renderKey();renderResponses();renderSheet();
