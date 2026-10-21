@@ -89,59 +89,116 @@ def read_image(data: bytes, filename: str):
     if img is None: raise HTTPException(400,"Could not read image. Use JPG, PNG or scanned PDF.")
     return [img]
 
+
 def score_page(img, key, marks, negative):
-    # Normalize to portrait A4 aspect ratio; scanner expects the app's own template.
-    h,w=img.shape[:2]
+    import cv2
+    import numpy as np
+
+    h, w = img.shape[:2]
+
+    # Rotate landscape scans to portrait
     if w > h:
-        img=cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-    img=cv2.resize(img,(1240,1754), interpolation=cv2.INTER_AREA)
-    gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
-    # Adaptive threshold handles moderate lighting variation.
-    bw=cv2.adaptiveThreshold(gray,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                             cv2.THRESH_BINARY_INV,31,12)
-    n=len(key); cols=3; rows=(n+cols-1)//cols
-    # These coordinates mirror the generated A4 sheet's 3-column grid.
-    # Ignore header and footer. Approximate normalized positions.
-    top_y=0.178
-    bottom_y=0.935
-    row_h=(bottom_y-top_y)/rows
-    col_left=[0.105,0.405,0.705]
-    col_step=0.0360
-    answers=[]; correct=wrong=blank=multi=0; total=0.0
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+
+    # Normalize to the generated A4 template size
+    img = cv2.resize(img, (1240, 1754),
+                     interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Reduce image noise before thresholding
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    bw = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 31, 10
+    )
+
+    n = len(key)
+    cols = 3
+    rows = (n + cols - 1) // cols
+
+    # Bubble centers measured from the generated A4 PDF layout
+    col_left = [0.12381, 0.41270, 0.70159]
+    col_step = 7.1 / 210.0
+
+    # Match row spacing used when generating the PDF
+    row_step_mm = min(7.0, 226.0 / rows)
+    first_y = 54.6 / 297.0
+
+    answers = []
+    correct = wrong = blank = multi = 0
+    total = 0.0
+
     for q in range(n):
-        col=q//rows; row=q%rows
-        cy=int((top_y + (row+0.48)*row_h)*1754)
-        cx0=int(col_left[col]*1240)
-        # Bubble centers roughly follow PDF generator coordinates.
-        vals=[]
+        col = q // rows
+        row = q % rows
+
+        cy = int((first_y + row * row_step_mm / 297.0)
+                 * 1754)
+        cx0 = int(col_left[col] * 1240)
+
+        vals = []
+
         for j in range(4):
-            cx=int(cx0 + (0.052 + j*col_step)*1240)
-            r=8
-            y1=max(0,cy-r); y2=min(1754,cy+r+1)
-            x1=max(0,cx-r); x2=min(1240,cx+r+1)
-            roi=bw[y1:y2,x1:x2]
-            vals.append(float(np.count_nonzero(roi))/max(1,roi.size))
-        # Filled bubbles have more dark pixels than outlined circles.
-        ranked=sorted(range(4),key=lambda j: vals[j],reverse=True)
-        first,second=ranked[0],ranked[1]
-        chosen=""
-        if vals[first] > 0.30 and vals[first]-vals[second] > 0.075:
-            chosen="ABCD"[first]
+            cx = int(cx0 + j * col_step * 1240)
+
+            # Measure darkness inside the central bubble area
+            radius = 6
+            roi = bw[
+                max(0, cy-radius):min(1754, cy+radius+1),
+                max(0, cx-radius):min(1240, cx+radius+1)
+            ]
+
+            vals.append(
+                float(np.count_nonzero(roi)) / max(1, roi.size)
+            )
+
+        ranked = sorted(range(4),
+                        key=lambda j: vals[j], reverse=True)
+        first, second = ranked[0], ranked[1]
+
+        # Conservative detection: uncertain marks require review
+        chosen = ""
+        if vals[first] > 0.30 and vals[first] - vals[second] > 0.10:
+            chosen = "ABCD"[first]
         elif vals[first] > 0.30 and vals[second] > 0.30:
-            chosen="MULTI"
-        if chosen=="MULTI":
-            multi+=1; status="Multiple marks"
+            chosen = "MULTI"
+
+        if chosen == "MULTI":
+            multi += 1
+            status = "Multiple marks"
         elif not chosen:
-            blank+=1; status="Blank"
-        elif chosen==key[q]:
-            correct+=1; total+=marks; status="Correct"
+            blank += 1
+            status = "Blank"
+        elif chosen == key[q]:
+            correct += 1
+            total += marks
+            status = "Correct"
         else:
-            wrong+=1; total-=negative; status="Wrong"
-        answers.append({"question":q+1,"detected":chosen or "—","key":key[q],
-                        "status":status,"bubble_darkness":[round(v,3) for v in vals]})
-    return {"questions":n,"correct":correct,"wrong":wrong,"blank":blank,
-            "multiple":multi,"marks":round(total,2),"maximum":round(n*marks,2),
-            "answers":answers,"review_required":bool(multi or blank)}
+            wrong += 1
+            total -= negative
+            status = "Wrong"
+
+        answers.append({
+            "question": q + 1,
+            "detected": chosen or "—",
+            "key": key[q],
+            "status": status,
+            "bubble_darkness": [round(v, 3) for v in vals]
+        })
+
+    return {
+        "questions": n,
+        "correct": correct,
+        "wrong": wrong,
+        "blank": blank,
+        "multiple": multi,
+        "marks": round(total, 2),
+        "maximum": round(n * marks, 2),
+        "answers": answers,
+        "review_required": bool(multi or blank)
+    }
+
 
 @app.post("/api/scan")
 async def scan(file: UploadFile=File(...), answer_key: str=Form(...),
