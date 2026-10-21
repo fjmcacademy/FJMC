@@ -118,7 +118,12 @@ def score_page(img, key, marks, negative):
     rows = (n + cols - 1) // cols
 
     # Bubble centers measured from the generated A4 PDF layout
-    col_left = [0.12381, 0.41270, 0.70159]
+    # Actual bubble-center positions for all 3 PDF columns
+col_left = [
+    26.0 / 210.0,
+    (26.0 + 182.0 / 3.0) / 210.0,
+    (26.0 + 2.0 * 182.0 / 3.0) / 210.0
+]
     col_step = 7.1 / 210.0
 
     # Match row spacing used when generating the PDF
