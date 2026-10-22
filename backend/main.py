@@ -441,3 +441,24 @@ def export_results_pdf():
     table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#e7efff")),("GRID",(0,0),(-1,-1),.4,colors.HexColor("#ccd6e5")),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),8),("PADDING",(0,0),(-1,-1),5)]))
     story.append(table);doc.build(story)
     return Response(buf.getvalue(),media_type="application/pdf",headers={"Content-Disposition":'attachment; filename="fjmc-all-students-results.pdf"'})
+    import shutil
+import pytesseract
+from fastapi import FastAPI
+
+@app.get("/ocr-status")
+def ocr_status():
+    path = shutil.which("tesseract")
+
+    try:
+        version = pytesseract.get_tesseract_version()
+        return {
+            "installed": True,
+            "path": path,
+            "version": str(version)
+        }
+    except Exception as e:
+        return {
+            "installed": False,
+            "path": path,
+            "error": str(e)
+        }
