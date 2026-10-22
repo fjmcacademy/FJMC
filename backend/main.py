@@ -193,7 +193,7 @@ def detect_roll_number(bw):
         cx = int((x0_mm + col * dx_mm) / 210.0 * width)
         for digit in range(10):
             # PDF y is measured from the bottom; image y from the top.
-            cy = int((297.0 - (top_y_mm - digit * dy_mm)) / 297.0 * height)
+            cy = int((47.0 + digit * 2.65) / 297.0 * height)
             radius = max(3, int(width * 0.0045))
             roi = bw[max(0, cy-radius):min(height, cy+radius+1), max(0, cx-radius):min(width, cx+radius+1)]
             values.append(float(np.count_nonzero(roi)) / max(1, roi.size))
@@ -242,16 +242,21 @@ def score_page(img, key, marks, negative):
     # Bubble centers measured from the generated A4 PDF layout
     # Actual bubble-center positions for all 3 PDF columns
     # Bubble coordinates
+        # Bubble columns — match the generated OMR template
     col_left = [
-        26.0 / 210.0,
-        (26.0 + 182.0 / 3.0) / 210.0,
-        (26.0 + 2.0 * 182.0 / 3.0) / 210.0
+        (14.0 + 12.0) / 210.0,
+        (14.0 + (182.0 / 3.0) + 12.0) / 210.0,
+        (14.0 + 2.0 * (182.0 / 3.0) + 12.0) / 210.0,
     ]
     col_step = 7.1 / 210.0
 
-    # Row spacing
-    row_step_mm = min(7.0, 234.0 / rows)
+    # Row spacing — match the generated OMR template
+    row_step_mm = min(7.0, 198.0 / rows)
     first_y = 82.6 / 297.0
+
+    answers = []
+    correct = wrong = blank = multi = 0
+    total = 0.0
 
     answers = []
     correct = wrong = blank = multi = 0
