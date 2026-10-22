@@ -201,7 +201,7 @@ def score_page(img, key, marks, negative):
     col_step = 7.1 / 210.0
 
     # Row spacing
-    row_step_mm = min(7.0, 234.0 / rows)
+    row_step_mm = min(7.0, 198.0 / rows)
     first_y = 82.6 / 297.0
 
     answers = []
