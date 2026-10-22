@@ -118,18 +118,42 @@ def template(payload: dict):
                     headers={"Content-Disposition": 'attachment; filename="fjmc-omr-template.pdf"'})
 
 def read_image(data: bytes, filename: str):
-    if filename.lower().endswith(".pdf"):
-        doc = fitz.open(stream=data, filetype="pdf")
-        if len(doc) > 1000:
-            raise HTTPException(400, "Please upload a PDF with 1000 pages or fewer per batch.")
-        for page in doc:
-            pix=page.get_pixmap(matrix=fitz.Matrix(2,2), alpha=False)
-            arr=np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height,pix.width,pix.n)
-            yield cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-        doc.close()
-    arr=np.frombuffer(data,dtype=np.uint8)
-    img=cv2.imdecode(arr,cv2.IMREAD_COLOR)
-    if img is None: raise HTTPException(400,"Could not read image. Use JPG, PNG or scanned PDF.")
+    if filename.lower().endswith(".pdf") or data[:4] == b"%PDF":
+        try:
+            with fitz.open(stream=data, filetype="pdf") as doc:
+                if len(doc) > 1000:
+                    raise HTTPException(
+                        400,
+                        "Please upload a PDF with 1000 pages or fewer per batch."
+                    )
+
+                for page in doc:
+                    pix = page.get_pixmap(
+                        matrix=fitz.Matrix(2, 2),
+                        alpha=False,
+                        colorspace=fitz.csRGB
+                    )
+                    arr = np.frombuffer(
+                        pix.samples, dtype=np.uint8
+                    ).reshape(pix.height, pix.width, pix.n)
+
+                    yield cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(400, f"Could not read PDF: {exc}")
+
+        return
+
+    arr = np.frombuffer(data, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+    if img is None:
+        raise HTTPException(
+            400, "Could not read image. Use JPG, PNG or scanned PDF."
+        )
+
     yield img
 
 
@@ -145,7 +169,7 @@ def detect_roll_number(bw):
         cx = int((x0_mm + col * dx_mm) / 210.0 * width)
         for digit in range(10):
             # PDF y is measured from the bottom; image y from the top.
-            cy = int((297.0 - (top_y_mm - digit * dy_mm)) / 297.0 * height)
+            cy = int((47.0 + digit * 2.65) / 297.0 * height)
             radius = max(3, int(width * 0.0045))
             roi = bw[max(0, cy-radius):min(height, cy+radius+1), max(0, cx-radius):min(width, cx+radius+1)]
             values.append(float(np.count_nonzero(roi)) / max(1, roi.size))
@@ -161,6 +185,7 @@ def detect_roll_number(bw):
     roll = "".join(digits)
     return (roll if "?" not in roll else None), digits, confidences
 
+
 def score_page(img, key, marks, negative):
     import cv2
     import numpy as np
@@ -171,88 +196,111 @@ def score_page(img, key, marks, negative):
     if w > h:
         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
 
-    # Normalize to the generated A4 template size
-    img = cv2.resize(img, (1240, 1754),
-                     interpolation=cv2.INTER_CUBIC)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    # Reduce image noise before thresholding
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    bw = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 31, 10
+    # Normalize to generated A4 template size
+    img = cv2.resize(
+        img,
+        (1240, 1754),
+        interpolation=cv2.INTER_CUBIC
     )
 
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    bw = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        10
+    )
+
+    # Detect 8-digit roll number
     roll_number, roll_digits, roll_confidence = detect_roll_number(bw)
 
     n = len(key)
-    cols = 3
-    rows = (n + cols - 1) // cols
+    rows = (n + 2) // 3
 
-    # Bubble centers measured from the generated A4 PDF layout
-    # Actual bubble-center positions for all 3 PDF columns
-    # Bubble coordinates
-    col_left = [
-        26.0 / 210.0,
-        (26.0 + 182.0 / 3.0) / 210.0,
-        (26.0 + 2.0 * 182.0 / 3.0) / 210.0
-    ]
-    col_step = 7.1 / 210.0
-
-    # Row spacing
+    # Coordinates matching the generated A4 template
+    col_w_mm = (210.0 - 28.0) / 3.0
     row_step_mm = min(7.0, 198.0 / rows)
-    first_y = 82.6 / 297.0
 
     answers = []
-    correct = wrong = blank = multi = 0
+    correct = 0
+    wrong = 0
+    blank = 0
+    multi = 0
     total = 0.0
+
+    height, width = bw.shape[:2]
 
     for q in range(n):
         col = q // rows
         row = q % rows
 
-        cy = int((first_y + row * row_step_mm / 297.0)
-                 * 1754)
-        cx0 = int(col_left[col] * 1240)
+        # Bubble center coordinates in millimetres
+        x0_mm = 14.0 + col * col_w_mm
+        y_from_top_mm = 82.6 + row * row_step_mm
 
         vals = []
 
         for j in range(4):
-            cx = int(cx0 + j * col_step * 1240)
+            x_mm = x0_mm + 12.0 + j * 7.1
 
-            # Measure darkness inside the central bubble area
-            radius = 6
-            roi = bw[
-                max(0, cy-radius):min(1754, cy+radius+1),
-                max(0, cx-radius):min(1240, cx+radius+1)
-            ]
+            cx = int(x_mm / 210.0 * width)
+            cy = int(y_from_top_mm / 297.0 * height)
 
-            vals.append(
+            # Measure darkness near the bubble centre
+            radius_x = max(3, int(round(0.85 / 210.0 * width)))
+            radius_y = max(3, int(round(0.85 / 297.0 * height)))
+
+            x1 = max(0, cx - radius_x)
+            x2 = min(width, cx + radius_x + 1)
+            y1 = max(0, cy - radius_y)
+            y2 = min(height, cy + radius_y + 1)
+
+            roi = bw[y1:y2, x1:x2]
+
+            darkness = (
                 float(np.count_nonzero(roi)) / max(1, roi.size)
             )
+            vals.append(darkness)
 
-        ranked = sorted(range(4),
-                        key=lambda j: vals[j], reverse=True)
-        first, second = ranked[0], ranked[1]
+        ranked = sorted(
+            range(4),
+            key=lambda j: vals[j],
+            reverse=True
+        )
 
-        # Conservative detection: uncertain marks require review
+        first = ranked[0]
+        second = ranked[1]
+
         chosen = ""
-        if vals[first] > 0.30 and vals[first] - vals[second] > 0.10:
+
+        # Identify a clearly marked answer
+        if (
+            vals[first] > 0.36
+            and vals[first] - vals[second] > 0.10
+        ):
             chosen = "ABCD"[first]
-        elif vals[first] > 0.30 and vals[second] > 0.30:
+
+        # Identify multiple marked bubbles
+        elif vals[first] > 0.36 and vals[second] > 0.36:
             chosen = "MULTI"
 
         if chosen == "MULTI":
             multi += 1
             status = "Multiple marks"
+
         elif not chosen:
             blank += 1
             status = "Blank"
+
         elif chosen == key[q]:
             correct += 1
             total += marks
             status = "Correct"
+
         else:
             wrong += 1
             total -= negative
@@ -263,7 +311,9 @@ def score_page(img, key, marks, negative):
             "detected": chosen or "—",
             "key": key[q],
             "status": status,
-            "bubble_darkness": [round(v, 3) for v in vals]
+            "bubble_darkness": [
+                round(v, 3) for v in vals
+            ]
         })
 
     return {
@@ -278,7 +328,9 @@ def score_page(img, key, marks, negative):
         "marks": round(total, 2),
         "maximum": round(n * marks, 2),
         "answers": answers,
-        "review_required": bool(multi or blank)
+        "review_required": bool(
+            multi or blank or not roll_number
+        )
     }
 
 
