@@ -304,10 +304,22 @@ def detect_student_name(img):
 
 
 def detect_answer_bubble(gray, cx, cy, scale):
-    # The generated template places A/B/C/D labels below the circle.
-    # Use a small interior disk at the bubble centre to reduce outline/label noise.
-    radius = max(2, int(0.55 * scale))
-    return dark_fraction(gray, cx, cy, radius, threshold=150)
+    """
+    Estimate bubble fill using two interior regions.
+    Avoid relying on a single tiny centre disk.
+    """
+    radius_outer = max(3, int(0.85 * scale))
+    radius_inner = max(2, int(0.45 * scale))
+
+    outer_score = dark_fraction(
+        gray, cx, cy, radius_outer, threshold=150
+    )
+    inner_score = dark_fraction(
+        gray, cx, cy, radius_inner, threshold=150
+    )
+
+    # Give the central interior more weight than the outer region.
+    return 0.65 * inner_score + 0.35 * outer_score
 
 
 def score_page(img, key, marks, negative):
@@ -352,8 +364,6 @@ def score_page(img, key, marks, negative):
         status = "Review required"
 
         # Conservative initial thresholds. Calibrate on your own printed scans.
-                # Conservative initial thresholds.
-        # Calibrate using your own printed and scanned OMR sheets.
         detected = "—"
         status = "Review required"
         gap = best - second_best
