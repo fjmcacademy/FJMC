@@ -360,6 +360,13 @@ def score_page(img, key, marks, negative):
         order = sorted(range(4), key=lambda j: vals[j], reverse=True)
         first, second = order[0], order[1]
         best, second_best = vals[first], vals[second]
+                if q < 10:
+            print(
+                f"[OMR DEBUG] Q{q+1} "
+                f"scores={[round(v, 3) for v in vals]} "
+                f"best={best:.3f} gap={best-second_best:.3f}"
+            )
+        
         detected = "—"
         status = "Review required"
 
