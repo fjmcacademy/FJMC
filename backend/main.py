@@ -352,7 +352,9 @@ def score_page(img, key, marks, negative):
         status = "Review required"
 
         # Conservative initial thresholds. Calibrate on your own printed scans.
-                detected = "—"
+                # Conservative initial thresholds.
+        # Calibrate using your own printed and scanned OMR sheets.
+        detected = "—"
         status = "Review required"
         gap = best - second_best
 
@@ -378,11 +380,6 @@ def score_page(img, key, marks, negative):
             status = "Multiple marks"
 
         else:
-            review += 1
-            detected = "REVIEW"
-            status = "Review required"
-        else:
-            # Ambiguous marks are not silently treated as blank or wrong.
             review += 1
             detected = "REVIEW"
             status = "Review required"
