@@ -352,15 +352,17 @@ def score_page(img, key, marks, negative):
         status = "Review required"
 
         # Conservative initial thresholds. Calibrate on your own printed scans.
+                detected = "—"
+        status = "Review required"
+        gap = best - second_best
+
         if best < 0.12:
             blank += 1
             status = "Blank"
-        elif second_best >= 0.25 and best >= 0.25:
-            multiple += 1
-            detected = "MULTI"
-            status = "Multiple marks"
-        elif best >= 0.22 and best - second_best >= 0.09:
+
+        elif best >= 0.22 and gap >= 0.09:
             detected = OPTIONS[first]
+
             if detected == key[q]:
                 correct += 1
                 total_marks += marks
@@ -369,6 +371,16 @@ def score_page(img, key, marks, negative):
                 wrong += 1
                 total_marks -= negative
                 status = "Wrong"
+
+        elif best >= 0.22 and second_best >= 0.25:
+            multiple += 1
+            detected = "MULTI"
+            status = "Multiple marks"
+
+        else:
+            review += 1
+            detected = "REVIEW"
+            status = "Review required"
         else:
             # Ambiguous marks are not silently treated as blank or wrong.
             review += 1
