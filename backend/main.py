@@ -322,117 +322,119 @@ def detect_answer_bubble(gray, cx, cy, scale):
     return 0.65 * inner_score + 0.35 * outer_score
 
 
-def score_page(img, key, marks, negative):
-    img = normalize_page(img)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    import cv2
+    import numpy as np
 
-    roll_number, roll_digits, roll_confidence, roll_scores = detect_roll_number(gray)
-    student_name = detect_student_name(img)
+    h, w = img.shape[:2]
+
+    # Rotate landscape scans to portrait
+    if w > h:
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+
+    # Normalize to the generated A4 template size
+    img = cv2.resize(img, (1240, 1754),
+                     interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Reduce image noise before thresholding
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    bw = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 31, 10
+    )
 
     n = len(key)
-    rows = (n + 2) // 3
+    cols = 3
+    rows = (n + cols - 1) // cols
+
+    # Bubble centers measured from the generated A4 PDF layout
+    # Actual bubble-center positions for all 3 PDF columns
+    # Bubble coordinates
     col_left = [
-        (14 + 12) / W_MM,
-        (14 + 182/3 + 12) / W_MM,
-        (14 + 2*182/3 + 12) / W_MM
+        26.0 / 210.0,
+        (26.0 + 182.0 / 3.0) / 210.0,
+        (26.0 + 2.0 * 182.0 / 3.0) / 210.0
     ]
-    col_step = 7.1 / W_MM
-    row_step_mm = min(7.0, 198.0 / rows)
-    first_y = 82.6 / H_MM
-    scale = min(IMG_W / W_MM, IMG_H / H_MM)
+    col_step = 7.1 / 210.0
+
+    # Row spacing
+    row_step_mm = min(7.0, 226.0 / rows)
+    first_y = 54.6 / 297.0
 
     answers = []
-    correct = wrong = blank = multiple = review = 0
-    total_marks = 0.0
+    correct = wrong = blank = multi = 0
+    total = 0.0
 
     for q in range(n):
-        col, row = q // rows, q % rows
-        cy = int((first_y + row * row_step_mm / H_MM) * IMG_H)
-        cx0 = int(col_left[col] * IMG_W)
+        col = q // rows
+        row = q % rows
+
+        cy = int((first_y + row * row_step_mm / 297.0)
+                 * 1754)
+        cx0 = int(col_left[col] * 1240)
+
         vals = []
 
         for j in range(4):
-            cx = int(cx0 + j * col_step * IMG_W)
-            # IMPORTANT: cy already represents the actual bubble centre.
-            vals.append(detect_answer_bubble(gray, cx, cy, scale))
+            cx = int(cx0 + j * col_step * 1240)
 
-        order = sorted(range(4), key=lambda j: vals[j], reverse=True)
-        first, second = order[0], order[1]
-        best, second_best = vals[first], vals[second]
-        gap = best - second_best
+            # Measure darkness inside the central bubble area
+            radius = 6
+            roi = bw[
+                max(0, cy-radius):min(1754, cy+radius+1),
+                max(0, cx-radius):min(1240, cx+radius+1)
+            ]
 
-        # Print scores for the first 10 questions to help calibrate detection.
-        if q < 10:
-            print(
-                f"[OMR DEBUG] Q{q + 1} "
-                f"scores={[round(v, 3) for v in vals]} "
-                f"best={best:.3f} gap={gap:.3f}"
+            vals.append(
+                float(np.count_nonzero(roi)) / max(1, roi.size)
             )
 
-        # Conservative initial thresholds. Calibrate on your own printed scans.
-        detected = "—"
-        status = "Review required"
+        ranked = sorted(range(4),
+                        key=lambda j: vals[j], reverse=True)
+        first, second = ranked[0], ranked[1]
 
-        if best < 0.12:
+        # Conservative detection: uncertain marks require review
+        chosen = ""
+        if vals[first] > 0.30 and vals[first] - vals[second] > 0.10:
+            chosen = "ABCD"[first]
+        elif vals[first] > 0.30 and vals[second] > 0.30:
+            chosen = "MULTI"
+
+        if chosen == "MULTI":
+            multi += 1
+            status = "Multiple marks"
+        elif not chosen:
             blank += 1
             status = "Blank"
-
-        elif best >= 0.22 and gap >= 0.09:
-            detected = OPTIONS[first]
-
-            if detected == key[q]:
-                correct += 1
-                total_marks += marks
-                status = "Correct"
-            else:
-                wrong += 1
-                total_marks -= negative
-                status = "Wrong"
-
-        elif best >= 0.22 and second_best >= 0.25:
-            multiple += 1
-            detected = "MULTI"
-            status = "Multiple marks"
-
+        elif chosen == key[q]:
+            correct += 1
+            total += marks
+            status = "Correct"
         else:
-            review += 1
-            detected = "REVIEW"
-            status = "Review required"
+            wrong += 1
+            total -= negative
+            status = "Wrong"
 
         answers.append({
             "question": q + 1,
-            "detected": detected,
+            "detected": chosen or "—",
             "key": key[q],
             "status": status,
             "bubble_darkness": [round(v, 3) for v in vals]
         })
 
-    processed = correct + wrong + blank + multiple + review
-    unprocessed = n - processed
-
     return {
         "questions": n,
-        "roll_number": roll_number,
-        "student_name": student_name,
-        "roll_digits": roll_digits,
-        "roll_confidence": roll_confidence,
-        "roll_scores": roll_scores,
         "correct": correct,
         "wrong": wrong,
         "blank": blank,
-        "multiple": multiple,
-        "review_count": review,
-        "processed": processed,
-        "unprocessed": unprocessed,
-        "marks": round(total_marks, 2),
+        "multiple": multi,
+        "marks": round(total, 2),
         "maximum": round(n * marks, 2),
         "answers": answers,
-        "review_required": bool(
-            multiple or review or not roll_number or not student_name
-        )
+        "review_required": bool(multi or blank)
     }
-
 
 def save_page_artifacts(img, result):
     roll = result.get("roll_number") or "UNREADABLE"
