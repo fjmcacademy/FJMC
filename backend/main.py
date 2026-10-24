@@ -133,26 +133,45 @@ def template(payload: dict):
     top, bottom = h - 81 * mm, 18 * mm
     row_h = min(7.0 * mm, (top - bottom) / rows)
     col_w = (w - 28 * mm) / cols
-    for q in range(n):
+        for q in range(n):
         col, row = q // rows, q % rows
         x0 = 14 * mm + col * col_w
         y = top - row * row_h
+
         c.setFont("Helvetica", 7)
         c.drawRightString(x0 + 8 * mm, y, str(q + 1))
+
         for j, opt in enumerate(OPTIONS):
-            bx, by = x0 + 12 * mm + j * 7.1 * mm, y - 1.6 * mm
+            bx = x0 + 12 * mm + j * 7.1 * mm
+            by = y - 1.6 * mm
+
             c.setLineWidth(0.65)
             c.circle(bx, by, 1.8 * mm, stroke=1, fill=0)
-            # Print option label OUTSIDE the bubble, on its right.
-c.setFont("Helvetica", 5)
-c.drawCentredString(bx + 2.45 * mm, by - 1.5, opt)
-            
+
+            # Option label outside the bubble
+            c.setFont("Helvetica", 5)
+            c.drawCentredString(
+                bx + 2.45 * mm,
+                by - 1.5,
+                opt
+            )
+
     c.setFont("Helvetica", 7)
-    c.drawCentredString(w / 2, 10 * mm, "FJMC OMR | Print at 100% scale | Do not fold or cover markers")
+    c.drawCentredString(
+        w / 2,
+        10 * mm,
+        "FJMC OMR | Print at 100% scale | Do not fold or cover markers"
+    )
+
     c.save()
-    return Response(buf.getvalue(), media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="fjmc-omr-template.pdf"'})
-
-
+    return Response(
+        buf.getvalue(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition":
+            'attachment; filename="fjmc-omr-template.pdf"'
+        }
+    )
 def read_image(data: bytes, filename: str):
     if filename.lower().endswith(".pdf"):
         try:
