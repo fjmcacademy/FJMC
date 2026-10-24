@@ -143,8 +143,10 @@ def template(payload: dict):
             bx, by = x0 + 12 * mm + j * 7.1 * mm, y - 1.6 * mm
             c.setLineWidth(0.65)
             c.circle(bx, by, 1.8 * mm, stroke=1, fill=0)
-            c.setFont("Helvetica", 5.5)
-            c.drawCentredString(bx, by - 0.7 * mm, opt)
+            # Print option label OUTSIDE the bubble, on its right.
+c.setFont("Helvetica", 5)
+c.drawCentredString(bx + 2.45 * mm, by - 1.5, opt)
+            
     c.setFont("Helvetica", 7)
     c.drawCentredString(w / 2, 10 * mm, "FJMC OMR | Print at 100% scale | Do not fold or cover markers")
     c.save()
@@ -236,14 +238,17 @@ def detect_student_name(img):
     except Exception:
         return None
 
-
 def detect_answer_bubble(gray, cx, cy, scale):
-    """Estimate ink inside bubble; use a small centre disk to reduce outline/label influence."""
-    radius_inner = max(2, int(0.55 * scale))
-    radius_outer = max(3, int(0.80 * scale))
-    inner = dark_fraction(gray, cx, cy, radius_inner, 150)
-    outer = dark_fraction(gray, cx, cy, radius_outer, 150)
-    return 0.75 * inner + 0.25 * outer
+    # Measure only the central fill area.
+    # Avoid the printed outline and the option label.
+    radius = max(2, int(0.35 * scale))
+
+    score = dark_fraction(
+        gray, cx, cy, radius, threshold=100
+    )
+
+    return score
+
 
 
 def score_page(img, key, marks, negative):
