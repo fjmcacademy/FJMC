@@ -327,16 +327,20 @@ def score_page(img, key, marks, negative):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    roll_number, roll_digits, roll_confidence, roll_scores = detect_roll_number(gray)
+    roll_number, roll_digits, roll_confidence, roll_scores = (
+        detect_roll_number(gray)
+    )
     student_name = detect_student_name(img)
 
     n = len(key)
     rows = (n + 2) // 3
+
     col_left = [
         (14 + 12) / W_MM,
-        (14 + 182/3 + 12) / W_MM,
-        (14 + 2*182/3 + 12) / W_MM
+        (14 + 182 / 3 + 12) / W_MM,
+        (14 + 2 * 182 / 3 + 12) / W_MM
     ]
+
     col_step = 7.1 / W_MM
     row_step_mm = min(7.0, 198.0 / rows)
     first_y = 82.6 / H_MM
@@ -346,89 +350,97 @@ def score_page(img, key, marks, negative):
     correct = wrong = blank = multiple = review = 0
     total_marks = 0.0
 
+    # Starting thresholds; verify against actual scan scores.
+    BLANK_THRESHOLD = 0.08
+    MARK_THRESHOLD = 0.13
+    MULTI_THRESHOLD = 0.13
+    MIN_GAP = 0.09
+
     for q in range(n):
         col, row = q // rows, q % rows
-        cy = int((first_y + row * row_step_mm / H_MM) * IMG_H)
+
+        cy = int(
+            (first_y + row * row_step_mm / H_MM) * IMG_H
+        )
         cx0 = int(col_left[col] * IMG_W)
+
         vals = []
 
         for j in range(4):
             cx = int(cx0 + j * col_step * IMG_W)
-            # IMPORTANT: cy already represents the actual bubble centre.
-            vals.append(detect_answer_bubble(gray, cx, cy, scale))
-
-        order = sorted(range(4), key=lambda j: vals[j], reverse=True)
-        first, second = order[0], order[1]
-        best, second_best = vals[first], vals[second]
-        gap = best - second_best
-
-        # Print scores for the first 10 questions to help calibrate detection.
-        if q < 10:
-            print(
-                f"[OMR DEBUG] Q{q + 1} "
-                f"scores={[round(v, 3) for v in vals]} "
-                f"best={best:.3f} gap={gap:.3f}"
+            vals.append(
+                detect_answer_bubble(gray, cx, cy, scale)
             )
 
-        
-# Classification thresholds
-BLANK_THRESHOLD = 0.08
-MARK_THRESHOLD = 0.13
-MULTI_THRESHOLD = 0.13
-MIN_GAP = 0.09
+        order = sorted(
+            range(4),
+            key=lambda j: vals[j],
+            reverse=True
+        )
 
-detected = "—"
-status = "Review required"
+        first, second = order[0], order[1]
+        best = vals[first]
+        second_best = vals[second]
+        gap = best - second_best
 
-if best < BLANK_THRESHOLD:
-    # Blank: always zero marks
-    blank += 1
-    detected = "—"
-    status = "Blank"
+        detected = "—"
+        status = "Review required"
 
-elif (
-    best >= MARK_THRESHOLD
-    and second_best >= MULTI_THRESHOLD
-):
-    # Multiple marked bubbles: zero marks
-    multiple += 1
-    detected = "MULTI"
-    status = "Multiple marks"
+        # 1. Blank question: zero marks.
+        if best < BLANK_THRESHOLD:
+            blank += 1
+            detected = "—"
+            status = "Blank"
 
-elif best >= MARK_THRESHOLD and gap >= MIN_GAP:
-    # One clearly marked bubble
-    detected = OPTIONS[first]
+        # 2. Multiple marked bubbles: zero marks.
+        elif (
+            best >= MARK_THRESHOLD
+            and second_best >= MULTI_THRESHOLD
+        ):
+            multiple += 1
+            detected = "MULTI"
+            status = "Multiple marks"
 
-    if detected == key[q]:
-        correct += 1
-        total_marks += marks
-        status = "Correct"
-    else:
-        wrong += 1
-        total_marks -= negative  # Your chosen negative marking
-        status = "Wrong"
+        # 3. One clearly marked answer.
+        elif best >= MARK_THRESHOLD and gap >= MIN_GAP:
+            detected = OPTIONS[first]
 
-else:
-    # Uncertain answer: zero marks until manually reviewed
-    review += 1
-    detected = "REVIEW"
-    status = "Review required"
+            if detected == key[q]:
+                correct += 1
+                total_marks += marks
+                status = "Correct"
+            else:
+                wrong += 1
+                total_marks -= negative
+                status = "Wrong"
 
-print(
-    f"[Q{q + 1}] scores="
-    f"{[round(v, 3) for v in vals]}, "
-    f"best={best:.3f}, "
-    f"second={second_best:.3f}, "
-    f"gap={gap:.3f}, status={status}"
-)
+        # 4. Uncertain answer: zero marks until reviewed.
+        else:
+            review += 1
+            detected = "REVIEW"
+            status = "Review required"
 
-        
+        # Debug output for first 10 questions.
+        if q < 10:
+            print(
+                f"[Q{q + 1}] "
+                f"scores={[round(v, 3) for v in vals]}, "
+                f"best={best:.3f}, "
+                f"second={second_best:.3f}, "
+                f"gap={gap:.3f}, "
+                f"detected={detected}, "
+                f"status={status}"
+            )
+
+        # IMPORTANT: Keep this inside the for-loop.
         answers.append({
             "question": q + 1,
             "detected": detected,
             "key": key[q],
             "status": status,
-            "bubble_darkness": [round(v, 3) for v in vals]
+            "bubble_darkness": [
+                round(v, 3) for v in vals
+            ]
         })
 
     processed = correct + wrong + blank + multiple + review
@@ -452,10 +464,11 @@ print(
         "maximum": round(n * marks, 2),
         "answers": answers,
         "review_required": bool(
-            multiple or review or not roll_number or not student_name
+            multiple or review
+            or not roll_number
+            or not student_name
         )
     }
-
 
 def save_page_artifacts(img, result):
     roll = result.get("roll_number") or "UNREADABLE"
