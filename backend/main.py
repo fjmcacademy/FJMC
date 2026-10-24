@@ -371,9 +371,9 @@ def score_page(img, key, marks, negative):
             )
 
         # Classification thresholds: calibrate using actual scan scores
-        BLANK_THRESHOLD = 0.12
-        MARK_THRESHOLD = 0.22
-        MULTI_THRESHOLD = 0.25
+        BLANK_THRESHOLD = 0
+        MARK_THRESHOLD = 0.13
+        MULTI_THRESHOLD = 0.13
         MIN_GAP = 0.09
 
         detected = "—"
