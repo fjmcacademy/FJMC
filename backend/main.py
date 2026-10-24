@@ -370,54 +370,59 @@ def score_page(img, key, marks, negative):
                 f"best={best:.3f} gap={gap:.3f}"
             )
 
-        # Classification thresholds: calibrate using actual scan scores
-        BLANK_THRESHOLD = 0
-        MARK_THRESHOLD = 0.13
-        MULTI_THRESHOLD = 0.13
-        MIN_GAP = 0.09
+        
+# Classification thresholds
+BLANK_THRESHOLD = 0.08
+MARK_THRESHOLD = 0.13
+MULTI_THRESHOLD = 0.13
+MIN_GAP = 0.09
 
-        detected = "—"
-        status = "Review required"
+detected = "—"
+status = "Review required"
 
-        if best < BLANK_THRESHOLD:
-            # No significant bubble detected
-            blank += 1
-            detected = "—"
-            status = "Blank"
+if best < BLANK_THRESHOLD:
+    # Blank: always zero marks
+    blank += 1
+    detected = "—"
+    status = "Blank"
 
-        elif best >= MARK_THRESHOLD and gap >= MIN_GAP:
-            # One clearly marked bubble
-            detected = OPTIONS[first]
+elif (
+    best >= MARK_THRESHOLD
+    and second_best >= MULTI_THRESHOLD
+):
+    # Multiple marked bubbles: zero marks
+    multiple += 1
+    detected = "MULTI"
+    status = "Multiple marks"
 
-            if detected == key[q]:
-                correct += 1
-                total_marks += marks
-                status = "Correct"
-            else:
-                wrong += 1
-                total_marks -= negative
-                status = "Wrong"
+elif best >= MARK_THRESHOLD and gap >= MIN_GAP:
+    # One clearly marked bubble
+    detected = OPTIONS[first]
 
-        elif best >= MARK_THRESHOLD and second_best >= MULTI_THRESHOLD:
-            # Two or more strongly marked bubbles
-            multiple += 1
-            detected = "MULTI"
-            status = "Multiple marks"
+    if detected == key[q]:
+        correct += 1
+        total_marks += marks
+        status = "Correct"
+    else:
+        wrong += 1
+        total_marks -= negative  # Your chosen negative marking
+        status = "Wrong"
 
-        else:
-            # Uncertain bubble: do not guess
-            review += 1
-            detected = "REVIEW"
-            status = "Review required"
+else:
+    # Uncertain answer: zero marks until manually reviewed
+    review += 1
+    detected = "REVIEW"
+    status = "Review required"
 
-        print(
-            f"[Q{q + 1}] scores="
-            f"{[round(v, 3) for v in vals]}, "
-            f"best={best:.3f}, "
-            f"second={second_best:.3f}, "
-            f"gap={gap:.3f}, status={status}"
-            )
+print(
+    f"[Q{q + 1}] scores="
+    f"{[round(v, 3) for v in vals]}, "
+    f"best={best:.3f}, "
+    f"second={second_best:.3f}, "
+    f"gap={gap:.3f}, status={status}"
+)
 
+        
         answers.append({
             "question": q + 1,
             "detected": detected,
