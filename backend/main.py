@@ -133,7 +133,7 @@ def template(payload: dict):
     top, bottom = h - 81 * mm, 18 * mm
     row_h = min(7.0 * mm, (top - bottom) / rows)
     col_w = (w - 28 * mm) / cols
-        for q in range(n):
+    for q in range(n):
         col, row = q // rows, q % rows
         x0 = 14 * mm + col * col_w
         y = top - row * row_h
