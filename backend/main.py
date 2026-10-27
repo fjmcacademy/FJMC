@@ -279,108 +279,155 @@ def detect_roll_number(gray):
     roll = "".join(digits)
     return (roll if "?" not in roll else None, digits, confidence, scores_all)
 
+
 def detect_student_name(img):
     try:
         h, w = img.shape[:2]
 
-        # Name line on the current FJMC PDF template.
-        # The ReportLab coordinates are measured from
-        # the bottom; h - 34 mm is 34 mm from the top.
-        x1 = int(w * 32 / W_MM)
-        x2 = int(w * 110 / W_MM)
-        y1 = int(h * 29 / H_MM)
-        y2 = int(h * 40 / H_MM)
+        # Crop the student-name line from the current template.
+        x1 = max(0, int(w * 32 / W_MM))
+        x2 = min(w, int(w * 110 / W_MM))
+        y1 = max(0, int(h * 29 / H_MM))
+        y2 = min(h, int(h * 40 / H_MM))
 
         crop = img[y1:y2, x1:x2]
 
         if crop.size == 0:
             return None
 
+        # Upscale for better character recognition.
         crop = cv2.resize(
             crop,
             None,
-            fx=3,
-            fy=3,
+            fx=4,
+            fy=4,
             interpolation=cv2.INTER_CUBIC
         )
 
-        gray = cv2.cvtColor(
-            crop,
-            cv2.COLOR_BGR2GRAY
-        )
+        if len(crop.shape) == 3:
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = crop.copy()
 
+        # Improve contrast and reduce small noise.
         gray = cv2.createCLAHE(
             clipLimit=2.0,
             tileGridSize=(8, 8)
         ).apply(gray)
 
-        # Try EasyOCR first.
-        reader = get_handwriting_reader()
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-        if reader is not None:
-            predictions = reader.readtext(
-                gray,
-                detail=1,
-                paragraph=False,
-                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .'’-",
-                min_size=5
-            )
+        # Try multiple image versions.
+        images = [gray]
 
-            candidates = []
+        _, otsu = cv2.threshold(
+            gray, 0, 255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        images.append(otsu)
 
-            for item in predictions:
-                text = re.sub(
-                    r"[^A-Za-z .'-]",
-                    "",
-                    item[1]
-                ).strip(" .-'")
+        adaptive = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            11
+        )
+        images.append(adaptive)
 
-                confidence = float(item[2])
+        if pytesseract is None:
+            print("[Name OCR] Tesseract is unavailable")
+            return None
 
-                if len(re.sub(r"[^A-Za-z]", "", text)) >= 3:
-                    if text.lower() not in (
-                        "name", "student", "candidate"
-                    ):
-                        candidates.append((text, confidence))
+        candidates = []
 
-            if candidates:
-                candidates.sort(
-                    key=lambda item: item[1],
-                    reverse=True
+        configs = [
+            "--oem 3 --psm 7",
+            "--oem 3 --psm 6",
+            "--oem 3 --psm 13"
+        ]
+
+        for image in images:
+            for config in configs:
+                data = pytesseract.image_to_data(
+                    image,
+                    config=(
+                        config
+                        + " -c tessedit_char_whitelist="
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                        "abcdefghijklmnopqrstuvwxyz.' -"
+                    ),
+                    output_type=pytesseract.Output.DICT
                 )
 
-                text, confidence = candidates[0]
+                words = []
+                confidences = []
 
-                if confidence >= 0.20:
-                    return text[:80]
+                for word, conf in zip(
+                    data["text"], data["conf"]
+                ):
+                    word = word.strip()
 
-        # Fallback to Tesseract if available.
-        if pytesseract is not None:
-            text = pytesseract.image_to_string(
-                gray,
-                config="--oem 3 --psm 7"
+                    try:
+                        confidence = float(conf)
+                    except (ValueError, TypeError):
+                        continue
+
+                    if word and confidence >= 0:
+                        words.append(word)
+                        confidences.append(confidence)
+
+                text = " ".join(words)
+                text = re.sub(
+                    r"[^A-Za-z .'-]", "", text
+                ).strip(" .-'")
+
+                text = re.sub(
+                    r"(?i)^(name|student|candidate)\s*:?\s*",
+                    "",
+                    text
+                ).strip()
+
+                letter_count = len(
+                    re.sub(r"[^A-Za-z]", "", text)
+                )
+
+                if letter_count < 3:
+                    continue
+
+                if text.lower() in (
+                    "name", "student", "candidate"
+                ):
+                    continue
+
+                if confidences:
+                    avg_confidence = (
+                        sum(confidences) / len(confidences)
+                    )
+                    candidates.append(
+                        (text, avg_confidence)
+                    )
+
+        if candidates:
+            candidates.sort(
+                key=lambda item: item[1],
+                reverse=True
             )
 
-            text = re.sub(
-                r"[^A-Za-z .'-]",
-                "",
-                text
-            ).strip(" .-'")
+            best_text, best_confidence = candidates[0]
 
-            text = re.sub(
-                r"(?i)^(name|student|candidate)\s*:?\s*",
-                "",
-                text
-            ).strip()
+            print(
+                f"[Name OCR] Candidate: {best_text!r}, "
+                f"confidence: {best_confidence:.1f}"
+            )
 
-            if len(re.sub(r"[^A-Za-z]", "", text)) >= 3:
-                return text[:80]
+            return best_text[:80]
 
     except Exception as exc:
         print(f"[Name OCR] Error: {exc}")
 
     return None
-
 
 def detect_answer_bubble(gray, cx, cy, scale):
     # Measure only the central fill area.
