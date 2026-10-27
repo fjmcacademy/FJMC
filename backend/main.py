@@ -383,6 +383,15 @@ def detect_student_name(img):
                     r"[^A-Za-z .'-]", "", text
                 ).strip(" .-'")
 
+                    if word and confidence >= 0:
+                        words.append(word)
+                        confidences.append(confidence)
+
+                text = " ".join(words)
+                text = re.sub(
+                    r"[^A-Za-z .'-]", "", text
+                ).strip(" .-'")
+
                 text = re.sub(
                     r"(?i)^(name|student|candidate)\s*:?\s*",
                     "",
