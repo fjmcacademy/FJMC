@@ -284,11 +284,13 @@ def detect_student_name(img):
     try:
         h, w = img.shape[:2]
 
-        # Crop the student-name area.
-        x1 = max(0, int(w * 32 / W_MM))
-        x2 = min(w, int(w * 110 / W_MM))
+        
+        # Corrected crop for the Name line.
+        x1 = max(0, int(w * 15 / W_MM))
+        x2 = min(w, int(w * 105 / W_MM))
         y1 = max(0, int(h * 29 / H_MM))
-        y2 = min(h, int(h * 40 / H_MM))
+        y2 = min(h, int(h * 38 / H_MM))
+
 
         crop = img[y1:y2, x1:x2]
 
