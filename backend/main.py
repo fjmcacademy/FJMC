@@ -125,7 +125,23 @@ def easyocr_status():
             "installed": False,
             "error": str(exc)
         }
-        
+
+
+@app.get("/easyocr-model-status")
+def easyocr_model_status():
+    try:
+        reader = get_handwriting_reader()
+        return {
+            "installed": easyocr is not None,
+            "model_loaded": reader is not None
+        }
+    except Exception as exc:
+        return {
+            "installed": easyocr is not None,
+            "model_loaded": False,
+            "error": str(exc)
+        }
+
 @app.post("/api/template")
 def template(payload: dict):
     try:
