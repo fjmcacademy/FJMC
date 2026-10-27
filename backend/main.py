@@ -12,6 +12,29 @@ try:
     import pytesseract
 except ImportError:
     pytesseract = None
+try:
+    import easyocr
+except ImportError:
+    easyocr = None
+
+_easyocr_reader = None
+
+
+def get_handwriting_reader():
+    global _easyocr_reader
+
+    if easyocr is None:
+        return None
+
+    if _easyocr_reader is None:
+        _easyocr_reader = easyocr.Reader(
+            ["en"],
+            gpu=False,
+            verbose=False
+        )
+
+    return _easyocr_reader
+
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
