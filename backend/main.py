@@ -280,11 +280,12 @@ def detect_roll_number(gray):
     return (roll if "?" not in roll else None, digits, confidence, scores_all)
 
 
+
 def detect_student_name(img):
     try:
         h, w = img.shape[:2]
 
-        # Crop the student-name line from the current template.
+        # Crop the student-name line.
         x1 = max(0, int(w * 32 / W_MM))
         x2 = min(w, int(w * 110 / W_MM))
         y1 = max(0, int(h * 29 / H_MM))
@@ -293,9 +294,10 @@ def detect_student_name(img):
         crop = img[y1:y2, x1:x2]
 
         if crop.size == 0:
+            print("[Name OCR] Empty name crop")
             return None
 
-        # Upscale for better character recognition.
+        # Enlarge the name area.
         crop = cv2.resize(
             crop,
             None,
@@ -304,24 +306,31 @@ def detect_student_name(img):
             interpolation=cv2.INTER_CUBIC
         )
 
+        # Convert to grayscale.
         if len(crop.shape) == 3:
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(
+                crop, cv2.COLOR_BGR2GRAY
+            )
         else:
             gray = crop.copy()
 
-        # Improve contrast and reduce small noise.
+        # Improve contrast.
         gray = cv2.createCLAHE(
             clipLimit=2.0,
             tileGridSize=(8, 8)
         ).apply(gray)
 
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        gray = cv2.GaussianBlur(
+            gray, (3, 3), 0
+        )
 
-        # Try multiple image versions.
+        # Prepare image variations.
         images = [gray]
 
         _, otsu = cv2.threshold(
-            gray, 0, 255,
+            gray,
+            0,
+            255,
             cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
         images.append(otsu)
@@ -348,15 +357,19 @@ def detect_student_name(img):
             "--oem 3 --psm 13"
         ]
 
+        whitelist = (
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz.'-"
+        )
+
+        # Try each image and OCR mode.
         for image in images:
             for config in configs:
                 data = pytesseract.image_to_data(
                     image,
                     config=(
-                        config
-                        + " -c tessedit_char_whitelist="
-                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                        "abcdefghijklmnopqrstuvwxyz.' -"
+                        f"{config} "
+                        f"-c tessedit_char_whitelist={whitelist}"
                     ),
                     output_type=pytesseract.Output.DICT
                 )
@@ -365,7 +378,8 @@ def detect_student_name(img):
                 confidences = []
 
                 for word, conf in zip(
-                    data["text"], data["conf"]
+                    data["text"],
+                    data["conf"]
                 ):
                     word = word.strip()
 
@@ -379,19 +393,14 @@ def detect_student_name(img):
                         confidences.append(confidence)
 
                 text = " ".join(words)
+
                 text = re.sub(
-                    r"[^A-Za-z .'-]", "", text
+                    r"[^A-Za-z .'-]",
+                    "",
+                    text
                 ).strip(" .-'")
 
-                    if word and confidence >= 0:
-                        words.append(word)
-                        confidences.append(confidence)
-
-                text = " ".join(words)
-                text = re.sub(
-                    r"[^A-Za-z .'-]", "", text
-                ).strip(" .-'")
-
+                # Remove common printed labels.
                 text = re.sub(
                     r"(?i)^(name|student|candidate)\s*:?\s*",
                     "",
@@ -406,7 +415,9 @@ def detect_student_name(img):
                     continue
 
                 if text.lower() in (
-                    "name", "student", "candidate"
+                    "name",
+                    "student",
+                    "candidate"
                 ):
                     continue
 
@@ -418,25 +429,28 @@ def detect_student_name(img):
                         (text, avg_confidence)
                     )
 
-        if candidates:
-            candidates.sort(
-                key=lambda item: item[1],
-                reverse=True
-            )
+        if not candidates:
+            print("[Name OCR] No reliable name candidate")
+            return None
 
-            best_text, best_confidence = candidates[0]
+        # Select the candidate with the highest OCR confidence.
+        candidates.sort(
+            key=lambda item: item[1],
+            reverse=True
+        )
 
-            print(
-                f"[Name OCR] Candidate: {best_text!r}, "
-                f"confidence: {best_confidence:.1f}"
-            )
+        best_text, best_confidence = candidates[0]
 
-            return best_text[:80]
+        print(
+            f"[Name OCR] Candidate: {best_text!r}, "
+            f"confidence: {best_confidence:.1f}"
+        )
+
+        return best_text[:80]
 
     except Exception as exc:
         print(f"[Name OCR] Error: {exc}")
-
-    return None
+        return None
 
 def detect_answer_bubble(gray, cx, cy, scale):
     # Measure only the central fill area.
