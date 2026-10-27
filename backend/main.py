@@ -259,26 +259,108 @@ def detect_roll_number(gray):
     roll = "".join(digits)
     return (roll if "?" not in roll else None, digits, confidence, scores_all)
 
-
 def detect_student_name(img):
-    if pytesseract is None:
-        return None
     try:
         h, w = img.shape[:2]
-        x1, x2 = int(w * 18 / W_MM), int(w * 108 / W_MM)
-        y1, y2 = int(h * 30 / H_MM), int(h * 39 / H_MM)
+
+        # Name line on the current FJMC PDF template.
+        # The ReportLab coordinates are measured from
+        # the bottom; h - 34 mm is 34 mm from the top.
+        x1 = int(w * 32 / W_MM)
+        x2 = int(w * 110 / W_MM)
+        y1 = int(h * 29 / H_MM)
+        y2 = int(h * 40 / H_MM)
+
         crop = img[y1:y2, x1:x2]
+
         if crop.size == 0:
             return None
-        crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        text = pytesseract.image_to_string(gray, config="--psm 7")
-        text = re.sub(r"[^A-Za-z .'-]", "", text).strip(" .-' ")
-        text = re.sub(r"(?i)^name\s*:?\s*", "", text).strip()
-        return text[:80] or None if len(re.sub(r"[^A-Za-z]", "", text)) >= 3 else None
-    except Exception:
-        return None
+
+        crop = cv2.resize(
+            crop,
+            None,
+            fx=3,
+            fy=3,
+            interpolation=cv2.INTER_CUBIC
+        )
+
+        gray = cv2.cvtColor(
+            crop,
+            cv2.COLOR_BGR2GRAY
+        )
+
+        gray = cv2.createCLAHE(
+            clipLimit=2.0,
+            tileGridSize=(8, 8)
+        ).apply(gray)
+
+        # Try EasyOCR first.
+        reader = get_handwriting_reader()
+
+        if reader is not None:
+            predictions = reader.readtext(
+                gray,
+                detail=1,
+                paragraph=False,
+                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .'’-",
+                min_size=5
+            )
+
+            candidates = []
+
+            for item in predictions:
+                text = re.sub(
+                    r"[^A-Za-z .'-]",
+                    "",
+                    item[1]
+                ).strip(" .-'")
+
+                confidence = float(item[2])
+
+                if len(re.sub(r"[^A-Za-z]", "", text)) >= 3:
+                    if text.lower() not in (
+                        "name", "student", "candidate"
+                    ):
+                        candidates.append((text, confidence))
+
+            if candidates:
+                candidates.sort(
+                    key=lambda item: item[1],
+                    reverse=True
+                )
+
+                text, confidence = candidates[0]
+
+                if confidence >= 0.20:
+                    return text[:80]
+
+        # Fallback to Tesseract if available.
+        if pytesseract is not None:
+            text = pytesseract.image_to_string(
+                gray,
+                config="--oem 3 --psm 7"
+            )
+
+            text = re.sub(
+                r"[^A-Za-z .'-]",
+                "",
+                text
+            ).strip(" .-'")
+
+            text = re.sub(
+                r"(?i)^(name|student|candidate)\s*:?\s*",
+                "",
+                text
+            ).strip()
+
+            if len(re.sub(r"[^A-Za-z]", "", text)) >= 3:
+                return text[:80]
+
+    except Exception as exc:
+        print(f"[Name OCR] Error: {exc}")
+
+    return None
+
 
 def detect_answer_bubble(gray, cx, cy, scale):
     # Measure only the central fill area.
