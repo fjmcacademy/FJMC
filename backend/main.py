@@ -293,6 +293,9 @@ def detect_student_name(img):
 
 
         crop = img[y1:y2, x1:x2]
+        print("[Name OCR] Crop size:", crop.shape)
+        cv2.imwrite("/tmp/name-crop.jpg", crop)
+        
 
         if crop.size == 0:
             print("[Name OCR] Empty name crop")
@@ -400,6 +403,7 @@ def detect_student_name(img):
                     confidences.append(confidence)
 
                 text = " ".join(words)
+                print(f"[Name OCR] Raw OCR: {text!r}")
 
                 text = re.sub(
                     r"[^A-Za-z .'-]",
