@@ -280,12 +280,11 @@ def detect_roll_number(gray):
     return (roll if "?" not in roll else None, digits, confidence, scores_all)
 
 
-
 def detect_student_name(img):
     try:
         h, w = img.shape[:2]
 
-        # Crop the student-name line.
+        # Crop the student-name area.
         x1 = max(0, int(w * 32 / W_MM))
         x2 = min(w, int(w * 110 / W_MM))
         y1 = max(0, int(h * 29 / H_MM))
@@ -297,7 +296,6 @@ def detect_student_name(img):
             print("[Name OCR] Empty name crop")
             return None
 
-        # Enlarge the name area.
         crop = cv2.resize(
             crop,
             None,
@@ -306,7 +304,6 @@ def detect_student_name(img):
             interpolation=cv2.INTER_CUBIC
         )
 
-        # Convert to grayscale.
         if len(crop.shape) == 3:
             gray = cv2.cvtColor(
                 crop, cv2.COLOR_BGR2GRAY
@@ -314,7 +311,6 @@ def detect_student_name(img):
         else:
             gray = crop.copy()
 
-        # Improve contrast.
         gray = cv2.createCLAHE(
             clipLimit=2.0,
             tileGridSize=(8, 8)
@@ -324,7 +320,6 @@ def detect_student_name(img):
             gray, (3, 3), 0
         )
 
-        # Prepare image variations.
         images = [gray]
 
         _, otsu = cv2.threshold(
@@ -362,7 +357,7 @@ def detect_student_name(img):
             "abcdefghijklmnopqrstuvwxyz.'-"
         )
 
-        # Try each image and OCR mode.
+        # Run OCR on each image version.
         for image in images:
             for config in configs:
                 data = pytesseract.image_to_data(
@@ -378,8 +373,7 @@ def detect_student_name(img):
                 confidences = []
 
                 for word, conf in zip(
-                    data["text"],
-                    data["conf"]
+                    data["text"], data["conf"]
                 ):
                     word = word.strip()
 
@@ -388,9 +382,20 @@ def detect_student_name(img):
                     except (ValueError, TypeError):
                         continue
 
-                    if word and confidence >= 0:
-                        words.append(word)
-                        confidences.append(confidence)
+                    if not word or confidence < 0:
+                        continue
+
+                    # Ignore common printed form labels.
+                    if word.lower().strip(" .:-") in {
+                        "name",
+                        "student",
+                        "candidate",
+                        "review"
+                    }:
+                        continue
+
+                    words.append(word)
+                    confidences.append(confidence)
 
                 text = " ".join(words)
 
@@ -400,10 +405,16 @@ def detect_student_name(img):
                     text
                 ).strip(" .-'")
 
-                # Remove common printed labels.
+                # Remove labels if OCR joins them to other text.
                 text = re.sub(
-                    r"(?i)^(name|student|candidate)\s*:?\s*",
+                    r"(?i)\b(name|student|candidate|review)\b",
                     "",
+                    text
+                ).strip(" .:-")
+
+                text = re.sub(
+                    r"\s+",
+                    " ",
                     text
                 ).strip()
 
@@ -412,13 +423,6 @@ def detect_student_name(img):
                 )
 
                 if letter_count < 3:
-                    continue
-
-                if text.lower() in (
-                    "name",
-                    "student",
-                    "candidate"
-                ):
                     continue
 
                 if confidences:
@@ -430,10 +434,9 @@ def detect_student_name(img):
                     )
 
         if not candidates:
-            print("[Name OCR] No reliable name candidate")
+            print("[Name OCR] No usable name candidate")
             return None
 
-        # Select the candidate with the highest OCR confidence.
         candidates.sort(
             key=lambda item: item[1],
             reverse=True
@@ -451,6 +454,9 @@ def detect_student_name(img):
     except Exception as exc:
         print(f"[Name OCR] Error: {exc}")
         return None
+
+
+
 
 def detect_answer_bubble(gray, cx, cy, scale):
     # Measure only the central fill area.
