@@ -12,39 +12,6 @@ try:
     import pytesseract
 except ImportError:
     pytesseract = None
-try:
-    import easyocr
-except ImportError:
-    easyocr = None
-
-_easyocr_reader = None
-_easyocr_init_attempted = False
-
-
-def get_handwriting_reader():
-    """Load EasyOCR on demand, not during app startup (helps Render cold starts)."""
-    global _easyocr_reader, _easyocr_init_attempted
-    if easyocr is None:
-        print("[EasyOCR] Package is not installed")
-        return None
-    if _easyocr_reader is not None:
-        return _easyocr_reader
-    if _easyocr_init_attempted:
-        return None
-
-    # Do not repeatedly try loading a large model if initialization fails.
-    _easyocr_init_attempted = True
-    try:
-        print("[EasyOCR] Loading English OCR model on demand...")
-        _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-        print("[EasyOCR] Model loaded")
-    except Exception as exc:
-        print(f"[EasyOCR] Model initialization failed: {exc}")
-        _easyocr_reader = None
-    return _easyocr_reader
-
-
-
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
@@ -122,35 +89,6 @@ def ocr_status():
     except Exception as exc:
         return {"installed": False, "path": path, "error": str(exc)}
 
-@app.get("/easyocr-status")
-def easyocr_status():
-    try:
-        import easyocr
-        return {
-            "installed": True,
-            "version": getattr(easyocr, "__version__", "available")
-        }
-    except ImportError as exc:
-        return {
-            "installed": False,
-            "error": str(exc)
-        }
-
-
-@app.get("/easyocr-model-status")
-def easyocr_model_status():
-    try:
-        reader = get_handwriting_reader()
-        return {
-            "installed": easyocr is not None,
-            "model_loaded": reader is not None
-        }
-    except Exception as exc:
-        return {
-            "installed": easyocr is not None,
-            "model_loaded": False,
-            "error": str(exc)
-        }
 
 @app.post("/api/template")
 def template(payload: dict):
@@ -300,181 +238,24 @@ def detect_roll_number(gray):
 
 
 def detect_student_name(img):
-    """
-    Read the student's name from the name line on the generated A4 OMR form.
-    Uses several tightly-cropped/preprocessed versions and returns None when
-    OCR has no plausible candidate (rather than saving obvious garbage).
-    """
-    if pytesseract is None and easyocr is None:
-        print("[Name OCR] Neither Tesseract nor EasyOCR is available")
+    if pytesseract is None:
         return None
-
     try:
         h, w = img.shape[:2]
-        sx, sy = w / W_MM, h / H_MM
-
-        # The template prints "Name:" at x=18 mm and y=34 mm from the top.
-        # Start after the label so it does not compete with the student's name.
-        x1 = max(0, int(29 * sx))
-        x2 = min(w, int(112 * sx))
-        y1 = max(0, int(29.5 * sy))
-        y2 = min(h, int(38.5 * sy))
+        x1, x2 = int(w * 18 / W_MM), int(w * 108 / W_MM)
+        y1, y2 = int(h * 30 / H_MM), int(h * 39 / H_MM)
         crop = img[y1:y2, x1:x2]
-
         if crop.size == 0:
-            print("[Name OCR] Empty name crop")
             return None
-
-        print("[Name OCR] Crop size:", crop.shape)
-        # Diagnostic image is useful in Render logs only as a saved file; it
-        # does not affect OCR. Keep the write best-effort.
-        try:
-            cv2.imwrite("/tmp/name-crop.jpg", crop)
-        except Exception:
-            pass
-
-        # Enlarge the handwriting and create alternatives for light/dark scans.
-        crop = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
-        if crop.ndim == 3:
-            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = crop.copy()
-
-        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-
-        variants = [gray]
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        variants.append(otsu)
-        _, otsu_inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        variants.append(otsu_inv)
-        adaptive = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11
-        )
-        variants.append(adaptive)
-
-        # Try EasyOCR on the cropped name line first. The model is loaded only
-        # when a scan needs it, so ordinary app startup stays lightweight.
-        easy_candidates = []
-        reader = get_handwriting_reader()
-        if reader is not None:
-            try:
-                for input_image in (gray, otsu):
-                    detections = reader.readtext(input_image, detail=1, paragraph=False)
-                    words = []
-                    confidences = []
-                    for _bbox, detected_text, confidence in detections:
-                        cleaned = re.sub(r"[^A-Za-z .'-]", "", str(detected_text)).strip(" .-' ")
-                        cleaned = re.sub(r"(?i)\b(name|student|candidate|review|fjmc|academy)\b", "", cleaned).strip()
-                        if not cleaned:
-                            continue
-                        letters = re.sub(r"[^A-Za-z]", "", cleaned)
-                        if len(letters) < 2:
-                            continue
-                        words.append(cleaned)
-                        try:
-                            confidences.append(float(confidence))
-                        except (ValueError, TypeError):
-                            pass
-                    text = re.sub(r"\s+", " ", " ".join(words)).strip(" .:-")
-                    letter_count = len(re.sub(r"[^A-Za-z]", "", text))
-                    if text and 3 <= letter_count <= 60 and confidences:
-                        avg_conf = sum(confidences) / len(confidences)
-                        print(f"[Name OCR] EasyOCR candidate={text!r}, confidence={avg_conf:.2f}")
-                        easy_candidates.append((avg_conf, text))
-            except Exception as exc:
-                print(f"[Name OCR] EasyOCR inference failed: {exc}")
-
-        whitelist = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.'-"
-        configs = (
-            "--oem 3 --psm 7",
-            "--oem 3 --psm 8",
-            "--oem 3 --psm 13",
-        )
-        candidates = []
-
-        if pytesseract is not None:
-          for image_index, image in enumerate(variants):
-              for config in configs:
-                  try:
-                      data = pytesseract.image_to_data(
-                          image,
-                          config=f"{config} -c tessedit_char_whitelist={whitelist}",
-                          output_type=pytesseract.Output.DICT,
-                          timeout=8,
-                      )
-                  except Exception as exc:
-                      print(f"[Name OCR] Tesseract attempt failed: {exc}")
-                      continue
-
-                  words = []
-                  confidences = []
-                  for word, conf in zip(data.get("text", []), data.get("conf", [])):
-                      word = word.strip()
-                      try:
-                          confidence = float(conf)
-                      except (ValueError, TypeError):
-                          continue
-                      if not word or confidence < 0:
-                          continue
-                      if word.lower().strip(" .:-") in {
-                          "name", "student", "candidate", "review", "fjmc", "academy"
-                      }:
-                          continue
-                      cleaned_word = re.sub(r"[^A-Za-z.'-]", "", word).strip(" .-'")
-                      if not cleaned_word:
-                          continue
-                      words.append(cleaned_word)
-                      confidences.append(confidence)
-
-                  text = re.sub(r"\s+", " ", " ".join(words)).strip()
-                  print(f"[Name OCR] variant={image_index} config={config!r} raw={text!r}")
-
-                  text = re.sub(r"(?i)\b(name|student|candidate|review|fjmc|academy)\b", "", text)
-                  text = re.sub(r"\s+", " ", text).strip(" .:-")
-                  letters = re.sub(r"[^A-Za-z]", "", text)
-
-                  # Reject tiny fragments and likely OCR noise.
-                  if len(letters) < 3 or len(letters) > 60 or not confidences:
-                      continue
-                  if len(set(letters.lower())) <= 1 and len(letters) < 8:
-                      continue
-
-                  avg_conf = sum(confidences) / len(confidences)
-                  # Prefer multi-word names and candidates with stronger OCR confidence.
-                  score = avg_conf + (8 if " " in text else 0) + min(len(letters), 20) * 0.15
-                  candidates.append((score, text, avg_conf))
-
-        # EasyOCR confidence is 0..1, while Tesseract uses 0..100. Prefer
-        # EasyOCR only when its own confidence is reasonably strong; otherwise
-        # retain the Tesseract fallback candidate.
-        if easy_candidates:
-            easy_candidates.sort(key=lambda item: item[0], reverse=True)
-            easy_confidence, easy_text = easy_candidates[0]
-            if easy_confidence >= 0.35:
-                print(f"[Name OCR] Selected EasyOCR name: {easy_text!r}, confidence={easy_confidence:.2f}")
-                return easy_text[:80]
-
-        if not candidates:
-            print("[Name OCR] No usable name candidate")
-            return None
-
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        _, best_text, best_confidence = candidates[0]
-        best_text = re.sub(r"\s+", " ", best_text).strip()[:80]
-        print(f"[Name OCR] Selected candidate: {best_text!r}, confidence={best_confidence:.1f}")
-
-        # A very low-confidence result is more dangerous than asking for review.
-        if best_confidence < 20:
-            print("[Name OCR] Candidate confidence too low; manual review needed")
-            return None
-
-        return best_text
-
-    except Exception as exc:
-        print(f"[Name OCR] Error: {exc}")
+        crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        text = pytesseract.image_to_string(gray, config="--psm 7")
+        text = re.sub(r"[^A-Za-z .'-]", "", text).strip(" .-' ")
+        text = re.sub(r"(?i)^name\s*:?\s*", "", text).strip()
+        return text[:80] or None if len(re.sub(r"[^A-Za-z]", "", text)) >= 3 else None
+    except Exception:
         return None
-
 
 def detect_answer_bubble(gray, cx, cy, scale):
     # Measure only the central fill area.
