@@ -112,7 +112,20 @@ def ocr_status():
     except Exception as exc:
         return {"installed": False, "path": path, "error": str(exc)}
 
-
+@app.get("/easyocr-status")
+def easyocr_status():
+    try:
+        import easyocr
+        return {
+            "installed": True,
+            "version": getattr(easyocr, "__version__", "available")
+        }
+    except ImportError as exc:
+        return {
+            "installed": False,
+            "error": str(exc)
+        }
+        
 @app.post("/api/template")
 def template(payload: dict):
     try:
