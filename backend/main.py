@@ -412,16 +412,15 @@ def _google_vision_name(crop):
 
 
 def detect_student_name(img):
-    """Read a handwritten name. Uses optional Vision handwriting OCR, then fast local OCR."""
+    """Read the name line with several fast local OCR passes; cloud OCR remains optional."""
     h, w = img.shape[:2]
-    # Separate the handwritten field from the printed title and the "Name:" label.
-    x1, x2 = int(w * 22 / W_MM), int(w * 110 / W_MM)
-    y1, y2 = int(h * 23 / H_MM), int(h * 34 / H_MM)
+    # Crop the name-writing area, excluding the printed 'Name:' label.
+    x1, x2 = int(w * 26 / W_MM), int(w * 90 / W_MM)
+    y1, y2 = int(h * 29.5 / H_MM), int(h * 37 / H_MM)
     crop = img[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
     if crop.size == 0:
         return None
 
-    # If configured, Cloud Vision's document-text model is much better for handwriting.
     cloud_text = _google_vision_name(crop)
     if cloud_text:
         return cloud_text
@@ -430,108 +429,98 @@ def detect_student_name(img):
 
     try:
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-        # Remove the long underline without deleting the handwritten character strokes.
-        inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-        kernel_width = max(25, int(crop.shape[1] * 0.065))
-        horizontal = cv2.morphologyEx(inv, cv2.MORPH_OPEN,
-                                       cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1)))
-        clean = cv2.subtract(inv, horizontal)
-        projection = np.count_nonzero(clean, axis=0)
-        # Split the two words at the widest substantial blank column gap, when present.
-        runs, run_start = [], None
-        for idx, count in enumerate(projection):
-            if count == 0 and run_start is None:
-                run_start = idx
-            elif count > 0 and run_start is not None:
-                if idx - run_start >= max(6, int(crop.shape[1] * 0.025)):
-                    runs.append((run_start, idx, idx-run_start))
-                run_start = None
-        if run_start is not None and crop.shape[1] - run_start >= 6:
-            runs.append((run_start, crop.shape[1], crop.shape[1]-run_start))
-        # Ignore blank margins; use a gap in the central part of the text line.
-        candidates_gaps = [g for g in runs if crop.shape[1]*0.20 < (g[0]+g[1])/2 < crop.shape[1]*0.82]
-        split = max(candidates_gaps, key=lambda g: g[2]) if candidates_gaps else None
-        segments = []
-        if split and split[2] >= max(10, int(crop.shape[1] * 0.035)):
-            left_end = split[0]
-            right_start = split[1]
-            segments = [(0, left_end), (right_start, crop.shape[1])]
-        else:
-            segments = [(0, crop.shape[1])]
-
-        words = []
-        for a, b in segments[:2]:
-            if b <= a:
-                continue
-            word = 255 - clean[:, a:b]
-            word = cv2.resize(word, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
-            word = cv2.copyMakeBorder(word, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
-            best = ""
-            # Three compact passes; avoids long OCR delays on the free Render instance.
-            for psm in (7, 8, 13):
+        variants = [gray, cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]]
+        candidates = []
+        for variant in variants:
+            enlarged = cv2.resize(variant, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+            enlarged = cv2.copyMakeBorder(enlarged, 18, 18, 18, 18, cv2.BORDER_CONSTANT, value=255)
+            for psm in (7, 13, 8):
                 try:
                     raw = pytesseract.image_to_string(
-                        word,
-                        config=f"--oem 1 --psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
-                        timeout=1.5)
-                    cleaned = re.sub(r"[^A-Za-z'-]", "", raw).strip("-' ")
-                    if len(cleaned) > len(best):
-                        best = cleaned
+                        enlarged,
+                        config=f"--oem 1 --psm {psm}",
+                        timeout=1.2)
                 except Exception:
                     continue
-            if best:
-                words.append(best.upper())
-        text = " ".join(words).strip()
-        if not text:
+                text = re.sub(r"(?i)\bname\b", " ", raw)
+                text = re.sub(r"[^A-Za-z '-]", " ", text)
+                text = re.sub(r"\s+", " ", text).strip(" '-")
+                letters = re.sub(r"[^A-Za-z]", "", text)
+                if len(letters) >= 3:
+                    candidates.append((len(letters), text.upper()))
+        if not candidates:
             return None
-        return text[:80]
+        # Prefer plausible multi-word names over fragments and label leftovers.
+        candidates.sort(key=lambda item: (item[0], " " in item[1]), reverse=True)
+        best = candidates[0][1]
+        return best[:80] if best else None
     except Exception:
         return None
 
-
 def detect_answer_bubble(gray, cx, cy, scale, img=None):
-    """Measure centre ink only; works with dark or coloured pen and ignores circle outlines."""
-    radius = max(2, int(0.42 * scale))
+    """Measure a wider inner disk so printed option letters don't look like filled marks."""
+    radius = max(4, int(0.85 * scale))
     return _generic_ink_fraction(gray, img, cx, cy, radius)
 
 
 def find_question_bubble_centres(gray, n):
-    """Use the printed circles themselves to correct per-row and per-bubble alignment."""
+    """Find common question rows across all three columns after page normalization."""
     rows = (n + 2) // 3
-    col_left_mm = [26.0, 14.0 + 182.0 / 3.0 + 12.0, 14.0 + 2.0 * 182.0 / 3.0 + 12.0]
-    nominal_x = [[int((col_left_mm[col] + j * 7.1) * IMG_W / W_MM) for j in range(4)]
+    sx = IMG_W / W_MM
+    col_left_mm = [26.0, 14.0 + (210.0 - 28.0) / 3.0 + 12.0,
+                   14.0 + 2.0 * (210.0 - 28.0) / 3.0 + 12.0]
+    nominal_x = [[int(round((col_left_mm[col] + j * 7.1) * sx)) for j in range(4)]
                  for col in range(3)]
+    all_x = [x for column in nominal_x for x in column]
     circles = _find_hough_circles(gray, roll=False)
-    centres = {}
+    relevant = [(x, y, r) for x, y, r in circles
+                if 390 <= y <= IMG_H - 50 and min(abs(x - xc) for xc in all_x) <= 16]
 
+    # Group circles by row. Require evidence at multiple option positions to reject
+    # stray Hough detections from heading text.
+    grouped = []
+    for x, y, r in sorted(relevant, key=lambda c: c[1]):
+        if not grouped or y - float(np.median([c[1] for c in grouped[-1]])) > 10:
+            grouped.append([(x, y, r)])
+        else:
+            grouped[-1].append((x, y, r))
+    supported_rows = []
+    for group in grouped:
+        bins = set()
+        for x, y, r in group:
+            nearest = min(range(len(all_x)), key=lambda i: abs(all_x[i] - x))
+            if abs(all_x[nearest] - x) <= 16:
+                bins.add(nearest)
+        if len(bins) >= 3:
+            supported_rows.append(int(round(float(np.median([c[1] for c in group])))))
+
+    if len(supported_rows) == rows:
+        row_ys = supported_rows
+    elif len(supported_rows) > rows:
+        best_run, best_cost = None, float("inf")
+        for start in range(len(supported_rows) - rows + 1):
+            run = supported_rows[start:start + rows]
+            gaps = np.diff(run)
+            med = float(np.median(gaps)) if len(gaps) else 0.0
+            cost = float(np.mean(np.abs(gaps - med))) if len(gaps) else 0.0
+            if cost < best_cost:
+                best_run, best_cost = run, cost
+        row_ys = best_run if best_run else supported_rows[:rows]
+    elif len(supported_rows) >= max(3, rows - 3):
+        step = float(np.median(np.diff(supported_rows)))
+        row_ys = [int(round(supported_rows[0] + i * step)) for i in range(rows)]
+    else:
+        # Fallbacks for the two common FJMC template layouts; row detection is preferred.
+        step_mm = min(7.0, 200.5 / rows)
+        start_mm = 82.4 if n == 100 else 76.1
+        row_ys = [int(round((start_mm + i * step_mm) * IMG_H / H_MM)) for i in range(rows)]
+
+    centres = {}
     for col in range(3):
         count = min(rows, max(0, n - col * rows))
-        if count <= 0:
-            continue
-        xs = nominal_x[col]
-        relevant = [(x, y, r) for x, y, r in circles
-                    if 465 <= y <= 1650 and min(abs(x-xc) for xc in xs) <= 20]
-        row_ys = _cluster_positions([y for x, y, r in relevant], 12)
-        if len(row_ys) != count:
-            # Safe geometric fallback if the circles are too faint for Hough detection.
-            step = min(7.0, 198.0 / rows)
-            start_y = [81.5, 79.8, 79.8][col]
-            row_ys = [int((start_y + row * step) * IMG_H / H_MM) for row in range(count)]
-
-        for row, yrow in enumerate(row_ys):
-            row_centres = []
-            for xnom in xs:
-                nearby = [(x, y, r) for x, y, r in relevant
-                          if abs(x-xnom) <= 22 and abs(y-yrow) <= 12]
-                if nearby:
-                    cx, cy, _ = min(nearby, key=lambda item: 0.7*abs(item[0]-xnom) + abs(item[1]-yrow))
-                    row_centres.append((int(cx), int(cy)))
-                else:
-                    row_centres.append((int(xnom), int(yrow)))
-            centres[(col, row)] = row_centres
+        for row in range(count):
+            centres[(col, row)] = [(x, row_ys[row]) for x in nominal_x[col]]
     return centres
-
 
 def score_page(img, key, marks, negative):
     img = normalize_page(img)
@@ -549,9 +538,9 @@ def score_page(img, key, marks, negative):
 
     # Centre alignment makes empty outlines score near zero and a genuinely filled
     # bubble score high. Ambiguous cases are reviewed, never silently guessed.
-    BLANK_THRESHOLD = 0.18
+    BLANK_THRESHOLD = 0.42
     MARK_THRESHOLD = 0.42
-    MULTI_THRESHOLD = 0.42
+    MULTI_THRESHOLD = 0.62
     MIN_GAP = 0.16
 
     for q in range(n):
