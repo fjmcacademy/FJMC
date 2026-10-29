@@ -195,13 +195,128 @@ def read_image(data: bytes, filename: str):
     yield img
 
 
+
 def normalize_page(img):
-    """Resize to template proportions. This does not correct perspective/cropping."""
+    """
+    Align a photographed FJMC OMR sheet using its four black
+    corner markers, then resize it to the existing template size.
+    Falls back to the previous resize behavior if markers fail.
+    """
+    if img is None or img.size == 0:
+        raise ValueError("Empty image supplied to normalize_page")
+
     h, w = img.shape[:2]
+
+    # Preserve the existing portrait orientation behavior.
     if w > h:
         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-    return cv2.resize(img, (IMG_W, IMG_H), interpolation=cv2.INTER_CUBIC)
+        h, w = img.shape[:2]
 
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Detect solid black square corner markers.
+    _, binary = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+
+    contours, _ = cv2.findContours(
+        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    candidates = []
+    image_area = h * w
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+
+        if area < image_area * 0.00004:
+            continue
+        if area > image_area * 0.015:
+            continue
+
+        x, y, bw, bh = cv2.boundingRect(contour)
+
+        if bw == 0 or bh == 0:
+            continue
+
+        aspect = bw / float(bh)
+        if not 0.65 <= aspect <= 1.35:
+            continue
+
+        # Reject outlines and irregular shapes.
+        fill_ratio = area / float(bw * bh)
+        if fill_ratio < 0.65:
+            continue
+
+        # Approximate the marker center.
+        cx = x + bw / 2.0
+        cy = y + bh / 2.0
+
+        candidates.append({
+            "center": (cx, cy),
+            "area": area,
+            "box": (x, y, bw, bh)
+        })
+
+    # The four solid corner markers should be among the largest
+    # approximately square, filled dark components.
+    candidates.sort(key=lambda item: item["area"], reverse=True)
+    candidates = candidates[:12]
+
+    if len(candidates) >= 4:
+        # Split into upper and lower marker pairs.
+        candidates.sort(key=lambda item: item["center"][1])
+
+        top_pair = sorted(
+            candidates[:2], key=lambda item: item["center"][0]
+        )
+        bottom_pair = sorted(
+            candidates[-2:], key=lambda item: item["center"][0]
+        )
+
+        src = np.float32([
+            top_pair[0]["center"],       # top-left
+            top_pair[1]["center"],       # top-right
+            bottom_pair[0]["center"],    # bottom-left
+            bottom_pair[1]["center"]     # bottom-right
+        ])
+
+        # Marker centers from the FJMC template, in millimetres.
+        # Template markers are 7 mm squares at x=8/195 mm,
+        # with top edges 15 mm from the top and 8 mm from bottom.
+        marker_centers_mm = [
+            (11.5, 18.5),
+            (198.5, 18.5),
+            (11.5, 285.5),
+            (198.5, 285.5)
+        ]
+
+        dst = np.float32([
+            (x_mm * IMG_W / W_MM, y_mm * IMG_H / H_MM)
+            for x_mm, y_mm in marker_centers_mm
+        ])
+
+        # Validate marker geometry before applying perspective warp.
+        src_area = cv2.contourArea(src.reshape(-1, 1, 2))
+        if src_area > image_area * 0.01:
+            matrix = cv2.getPerspectiveTransform(src, dst)
+
+            aligned = cv2.warpPerspective(
+                img,
+                matrix,
+                (IMG_W, IMG_H),
+                flags=cv2.INTER_CUBIC,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(255, 255, 255)
+            )
+
+            if aligned is not None and aligned.size:
+                return aligned
+
+    # Fallback: retain the previous behavior.
+    return cv2.resize(
+        img, (IMG_W, IMG_H), interpolation=cv2.INTER_CUBIC
+    )
 
 def dark_fraction(gray, cx, cy, radius, threshold=150):
     h, w = gray.shape[:2]
