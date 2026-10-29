@@ -3,7 +3,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from io import BytesIO
-import json, csv, os, re, datetime, tempfile, shutil
+import json, csv, os, re, datetime, tempfile, shutil, base64, urllib.request, urllib.error
 import cv2
 import numpy as np
 import fitz
@@ -175,36 +175,46 @@ def read_image(data: bytes, filename: str):
 
 
 def normalize_page(img):
-    """Correct the page using its four black registration squares, then map to A4."""
+    """Perspective-correct the sheet from its four registration squares; tolerate camera resolutions."""
     h, w = img.shape[:2]
     if w > h:
         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
         h, w = img.shape[:2]
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    bw = cv2.threshold(gray, 75, 255, cv2.THRESH_BINARY_INV)[1]
+    # Black registration blocks remain detectable across ordinary phone resolutions.
+    bw = cv2.threshold(gray, 90, 255, cv2.THRESH_BINARY_INV)[1]
     contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    short = min(h, w)
+    min_side, max_side = max(8, int(short * 0.018)), int(short * 0.095)
     found = {}
     for contour in contours:
         x, y, ww, hh = cv2.boundingRect(contour)
         area = cv2.contourArea(contour)
-        if not (20 <= ww <= 100 and 20 <= hh <= 100 and 0.65 <= ww / max(hh, 1) <= 1.5 and area >= 300):
+        if not (min_side <= ww <= max_side and min_side <= hh <= max_side
+                and 0.65 <= ww / max(hh, 1) <= 1.5
+                and area >= min_side * min_side * 0.45):
+            continue
+        # Approximate solid square blocks, not text strokes or small printed circles.
+        fill_ratio = area / max(1, ww * hh)
+        if fill_ratio < 0.48:
             continue
         cx, cy = x + ww / 2.0, y + hh / 2.0
         corner = None
-        if cx < 0.18 * w and cy < 0.18 * h:
+        if cx < 0.28 * w and cy < 0.28 * h:
             corner = "tl"
-        elif cx > 0.78 * w and cy < 0.18 * h:
+        elif cx > 0.72 * w and cy < 0.28 * h:
             corner = "tr"
-        elif cx < 0.18 * w and cy > 0.78 * h:
+        elif cx < 0.28 * w and cy > 0.72 * h:
             corner = "bl"
-        elif cx > 0.78 * w and cy > 0.78 * h:
+        elif cx > 0.72 * w and cy > 0.72 * h:
             corner = "br"
         if corner and (corner not in found or area > found[corner][0]):
             found[corner] = (area, (cx, cy))
 
     if len(found) == 4:
         src = np.float32([found[k][1] for k in ("tl", "tr", "bl", "br")])
+        # The four marks in the printed template are centred at these A4 coordinates.
         dst = np.float32([
             (11.5 / W_MM * IMG_W, 11.5 / H_MM * IMG_H),
             (198.5 / W_MM * IMG_W, 11.5 / H_MM * IMG_H),
@@ -215,7 +225,7 @@ def normalize_page(img):
         return cv2.warpPerspective(img, matrix, (IMG_W, IMG_H), flags=cv2.INTER_CUBIC,
                                    borderMode=cv2.BORDER_REPLICATE)
 
-    # Fallback for scans/photos where one or more corner squares are missing.
+    # Keep the fallback fast. Circle-centre alignment below handles small residual skew.
     return cv2.resize(img, (IMG_W, IMG_H), interpolation=cv2.INTER_CUBIC)
 
 
@@ -230,6 +240,40 @@ def dark_fraction(gray, cx, cy, radius, threshold=150):
     crop = gray[y1:y2, x1:x2]
     count = int(np.count_nonzero(mask))
     return float(np.count_nonzero((crop < threshold) & mask)) / count if count else 0.0
+
+
+def _generic_ink_fraction(gray, img, cx, cy, radius=3):
+    """Colour-independent centre ink score for blue, black, red and other ordinary pens."""
+    h, w = gray.shape[:2]
+    cx, cy = int(cx), int(cy)
+    radius = max(2, int(radius))
+    x1, x2 = max(0, cx-radius), min(w, cx+radius+1)
+    y1, y2 = max(0, cy-radius), min(h, cy+radius+1)
+    if x1 >= x2 or y1 >= y2:
+        return 0.0
+    yy, xx = np.ogrid[y1:y2, x1:x2]
+    disk = (xx-cx)**2 + (yy-cy)**2 <= radius**2
+    patch = gray[y1:y2, x1:x2]
+    # Local paper estimate compensates for shadows/uneven lighting on phone photos.
+    xa, xb = max(0, cx-9), min(w, cx+10)
+    ya, yb = max(0, cy-9), min(h, cy+10)
+    yy2, xx2 = np.ogrid[ya:yb, xa:xb]
+    dist2 = (xx2-cx)**2 + (yy2-cy)**2
+    ring = (dist2 >= (radius+3)**2) & (dist2 <= 8**2)
+    local = gray[ya:yb, xa:xb]
+    vals = local[ring]
+    # Absolute dark-ink detection is essential for black pens: a filled mark can
+    # make the surrounding annulus dark too, which would defeat local-background subtraction.
+    # Saturation below supplements it for bright red/blue/green pens.
+    dark = patch < 145
+    colour = np.zeros_like(dark, dtype=bool)
+    if img is not None:
+        hsv = cv2.cvtColor(img[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+        # Saturated ink catches coloured pens whose grayscale value is relatively bright.
+        colour = (hsv[:, :, 1] >= 100) & (hsv[:, :, 2] <= 230)
+    ink = (dark | colour) & disk
+    count = int(np.count_nonzero(disk))
+    return float(np.count_nonzero(ink)) / count if count else 0.0
 
 
 def _cluster_positions(values, max_gap):
@@ -273,80 +317,183 @@ def _blue_ink_fraction(hsv, cx, cy, radius=4):
     return float(np.count_nonzero(ink & mask)) / count if count else 0.0
 
 
-def detect_roll_number(gray, img=None):
-    """Read the eight-digit roll grid, using circle centres and blue-ink fill when available."""
+def _roll_mark_score(gray, img, cx, cy):
+    """Detect a solid fill blob while suppressing the thin printed digit inside each roll bubble."""
     h, w = gray.shape[:2]
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV) if img is not None else None
+    cx, cy = int(cx), int(cy)
+    r = 5
+    x1, x2 = max(0, cx-r), min(w, cx+r+1)
+    y1, y2 = max(0, cy-r), min(h, cy+r+1)
+    g = gray[y1:y2, x1:x2]
+    if g.size == 0:
+        return 0.0
+    ink = (g < 115).astype(np.uint8) * 255
+    if img is not None:
+        hsv = cv2.cvtColor(img[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+        coloured = ((hsv[:, :, 1] >= 70) & (hsv[:, :, 2] <= 230)).astype(np.uint8) * 255
+        ink = cv2.bitwise_or(ink, coloured)
+    # A pen-filled bubble leaves a broad solid region; a printed digit is mostly thin strokes.
+    opened = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return float(np.count_nonzero(opened)) / float(opened.size)
+
+
+def detect_roll_number(gray, img=None):
+    """Read eight roll digits independently of blue/black/red pen colour."""
+    h, w = gray.shape[:2]
     circles = _find_hough_circles(gray, roll=True)
-    # Nominal template locations; the detected centres compensate for camera/paper skew.
-    nominal_x = [int((42.0 + col * 17.0) * w / W_MM) for col in range(8)]
-    digits, confidence, scores_all = [], [], []
     sx, sy = w / W_MM, h / H_MM
-
-    for col, xnom in enumerate(nominal_x):
+    digits, confidence, scores_all = [], [], []
+    # This printed sheet's first roll bubble is near 45 mm from the top.
+    # Restrict Hough candidates to the roll grid, excluding heading text above it.
+    for col in range(8):
+        xnom = int((41.0 + col * 17.0) * sx)
         candidates = [(x, y, r) for x, y, r in circles
-                      if abs(x - xnom) <= 27 and 235 <= y <= int(h * 0.25)]
-        row_centres = _cluster_positions([y for x, y, r in candidates], 9)
-        if len(row_centres) != 10:
-            # This fallback is for lower-resolution scans where Hough misses small circles.
-            row_centres = [int((44.0 + digit * 2.8) * sy) for digit in range(10)]
-
-        blue_scores, dark_scores = [], []
-        for digit, yguess in enumerate(row_centres):
-            nearby = [(x, y, r) for x, y, r in candidates if abs(y-yguess) <= 7]
+                      if abs(x-xnom) <= max(12, int(4.5*sx)) and int(0.14*h) <= y <= int(0.25*h)]
+        row_centres = _cluster_positions([y for x, y, r in candidates], max(4, int(1.5*sy)))
+        # If Hough misses a circle, use the nominal row and snap to any nearby detected circle.
+        nominal_ys = [int((45.0 + digit * 2.65) * sy) for digit in range(10)]
+        if len(row_centres) == 10:
+            y_guesses = row_centres
+        else:
+            y_guesses = []
+            for ynom in nominal_ys:
+                near = [y for y in row_centres if abs(y-ynom) <= max(8, int(2.0*sy))]
+                y_guesses.append(min(near, key=lambda y: abs(y-ynom)) if near else ynom)
+        scores = []
+        for yguess in y_guesses:
+            nearby = [(x, y, r) for x, y, r in candidates if abs(y-yguess) <= max(5, int(1.2*sy))]
             if nearby:
                 cx, cy, _ = min(nearby, key=lambda item: abs(item[0]-xnom) + 1.5*abs(item[1]-yguess))
             else:
                 cx, cy = xnom, yguess
-            if hsv is not None:
-                blue_scores.append(_blue_ink_fraction(hsv, int(cx), int(cy), 4))
-            else:
-                blue_scores.append(0.0)
-            dark_scores.append(dark_fraction(gray, int(cx), int(cy), max(2, int(0.50 * min(sx, sy))), 105))
-
-        # Blue/purple pen is very separable from the printed black digits in this sheet.
-        use_blue = max(blue_scores, default=0.0) >= 0.18
-        scores = blue_scores if use_blue else dark_scores
+            scores.append(_roll_mark_score(gray, img, cx, cy))
         order = sorted(range(10), key=lambda d: scores[d], reverse=True)
         best, second = order[0], order[1]
         gap = scores[best] - scores[second]
-        if use_blue:
-            valid = scores[best] >= 0.22 and gap >= 0.15
-        else:
-            valid = scores[best] >= 0.78 and gap >= 0.12
+        valid = scores[best] >= 0.28 and gap >= 0.18
         digits.append(str(best) if valid else "?")
         confidence.append(round(float(gap), 3))
         scores_all.append([round(float(v), 3) for v in scores])
-
     roll = "".join(digits)
     return (roll if "?" not in roll else None, digits, confidence, scores_all)
 
 
-def detect_student_name(img):
-    if pytesseract is None:
+def _google_vision_name(crop):
+    """Optional handwriting-capable OCR. Only sends the name crop if an API key is configured."""
+    api_key = os.environ.get("GOOGLE_CLOUD_VISION_API_KEY", "").strip()
+    if not api_key:
         return None
     try:
-        h, w = img.shape[:2]
-        x1, x2 = int(w * 16 / W_MM), int(w * 100 / W_MM)
-        y1, y2 = int(h * 22 / H_MM), int(h * 33 / H_MM)
-        crop = img[y1:y2, x1:x2]
-        if crop.size == 0:
+        ok, encoded = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
             return None
-        crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        text = pytesseract.image_to_string(gray, config="--psm 7")
-        text = re.sub(r"[^A-Za-z .'-]", "", text).strip(" .-' ")
-        text = re.sub(r"(?i)^name\s*:?\s*", "", text).strip()
-        return text[:80] or None if len(re.sub(r"[^A-Za-z]", "", text)) >= 3 else None
+        payload = {
+            "requests": [{
+                "image": {"content": base64.b64encode(encoded.tobytes()).decode("ascii")},
+                "features": [{"type": "DOCUMENT_TEXT_DETECTION", "maxResults": 1}],
+                "imageContext": {"languageHints": ["en"]}
+            }]
+        }
+        req = urllib.request.Request(
+            "https://vision.googleapis.com/v1/images:annotate?key=" + api_key,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=3.5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        responses = result.get("responses", [])
+        text = responses[0].get("fullTextAnnotation", {}).get("text", "") if responses else ""
+        # This crop contains only the name line; strip any printed field label.
+        text = re.sub(r"(?i)\bname\s*:?", " ", text)
+        lines = [re.sub(r"[^A-Za-z .'-]", "", line).strip(" .'- ") for line in text.splitlines()]
+        lines = [line for line in lines if len(re.sub(r"[^A-Za-z]", "", line)) >= 3]
+        return max(lines, key=len)[:80] if lines else None
     except Exception:
         return None
 
 
-def detect_answer_bubble(gray, cx, cy, scale):
-    """Measure ink in the bubble's centre, avoiding the printed ring and option label."""
-    radius = max(3, int(0.58 * scale))  # about 0.58 mm, inside the printed circle
-    return dark_fraction(gray, cx, cy, radius, 145)
+def detect_student_name(img):
+    """Read a handwritten name. Uses optional Vision handwriting OCR, then fast local OCR."""
+    h, w = img.shape[:2]
+    # Separate the handwritten field from the printed title and the "Name:" label.
+    x1, x2 = int(w * 22 / W_MM), int(w * 110 / W_MM)
+    y1, y2 = int(h * 23 / H_MM), int(h * 34 / H_MM)
+    crop = img[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+    if crop.size == 0:
+        return None
+
+    # If configured, Cloud Vision's document-text model is much better for handwriting.
+    cloud_text = _google_vision_name(crop)
+    if cloud_text:
+        return cloud_text
+    if pytesseract is None:
+        return None
+
+    try:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        # Remove the long underline without deleting the handwritten character strokes.
+        inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        kernel_width = max(25, int(crop.shape[1] * 0.065))
+        horizontal = cv2.morphologyEx(inv, cv2.MORPH_OPEN,
+                                       cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1)))
+        clean = cv2.subtract(inv, horizontal)
+        projection = np.count_nonzero(clean, axis=0)
+        # Split the two words at the widest substantial blank column gap, when present.
+        runs, run_start = [], None
+        for idx, count in enumerate(projection):
+            if count == 0 and run_start is None:
+                run_start = idx
+            elif count > 0 and run_start is not None:
+                if idx - run_start >= max(6, int(crop.shape[1] * 0.025)):
+                    runs.append((run_start, idx, idx-run_start))
+                run_start = None
+        if run_start is not None and crop.shape[1] - run_start >= 6:
+            runs.append((run_start, crop.shape[1], crop.shape[1]-run_start))
+        # Ignore blank margins; use a gap in the central part of the text line.
+        candidates_gaps = [g for g in runs if crop.shape[1]*0.20 < (g[0]+g[1])/2 < crop.shape[1]*0.82]
+        split = max(candidates_gaps, key=lambda g: g[2]) if candidates_gaps else None
+        segments = []
+        if split and split[2] >= max(10, int(crop.shape[1] * 0.035)):
+            left_end = split[0]
+            right_start = split[1]
+            segments = [(0, left_end), (right_start, crop.shape[1])]
+        else:
+            segments = [(0, crop.shape[1])]
+
+        words = []
+        for a, b in segments[:2]:
+            if b <= a:
+                continue
+            word = 255 - clean[:, a:b]
+            word = cv2.resize(word, None, fx=5, fy=5, interpolation=cv2.INTER_CUBIC)
+            word = cv2.copyMakeBorder(word, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
+            best = ""
+            # Three compact passes; avoids long OCR delays on the free Render instance.
+            for psm in (7, 8, 13):
+                try:
+                    raw = pytesseract.image_to_string(
+                        word,
+                        config=f"--oem 1 --psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+                        timeout=1.5)
+                    cleaned = re.sub(r"[^A-Za-z'-]", "", raw).strip("-' ")
+                    if len(cleaned) > len(best):
+                        best = cleaned
+                except Exception:
+                    continue
+            if best:
+                words.append(best.upper())
+        text = " ".join(words).strip()
+        if not text:
+            return None
+        return text[:80]
+    except Exception:
+        return None
+
+
+def detect_answer_bubble(gray, cx, cy, scale, img=None):
+    """Measure centre ink only; works with dark or coloured pen and ignores circle outlines."""
+    radius = max(2, int(0.42 * scale))
+    return _generic_ink_fraction(gray, img, cx, cy, radius)
 
 
 def find_question_bubble_centres(gray, n):
@@ -403,9 +550,9 @@ def score_page(img, key, marks, negative):
     # Centre alignment makes empty outlines score near zero and a genuinely filled
     # bubble score high. Ambiguous cases are reviewed, never silently guessed.
     BLANK_THRESHOLD = 0.18
-    MARK_THRESHOLD = 0.35
-    MULTI_THRESHOLD = 0.35
-    MIN_GAP = 0.12
+    MARK_THRESHOLD = 0.42
+    MULTI_THRESHOLD = 0.42
+    MIN_GAP = 0.16
 
     for q in range(n):
         col, row = q // rows, q % rows
@@ -417,7 +564,7 @@ def score_page(img, key, marks, negative):
             cy = int((start_y + row * step) * IMG_H / H_MM)
             col_left_mm = [26.0, 14.0 + 182.0 / 3.0 + 12.0, 14.0 + 2.0 * 182.0 / 3.0 + 12.0]
             centres = [(int((col_left_mm[col] + j * 7.1) * IMG_W / W_MM), cy) for j in range(4)]
-        vals = [detect_answer_bubble(gray, cx, cy, scale) for cx, cy in centres]
+        vals = [detect_answer_bubble(raw_gray, cx, cy, scale, img) for cx, cy in centres]
         order = sorted(range(4), key=lambda j: vals[j], reverse=True)
         first, second = order[0], order[1]
         best, second_best = vals[first], vals[second]
@@ -445,8 +592,6 @@ def score_page(img, key, marks, negative):
         else:
             review += 1
 
-        if q < 10:
-            print(f"[Q{q+1}] scores={[round(v, 3) for v in vals]}, centres={centres}, detected={detected}, status={status}")
         answers.append({"question": q + 1, "detected": detected, "key": key[q], "status": status,
                         "bubble_darkness": [round(v, 3) for v in vals]})
 
