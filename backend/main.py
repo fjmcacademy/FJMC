@@ -8,6 +8,8 @@ import json, csv, os, re, datetime, tempfile, shutil
 import cv2
 import numpy as np
 import fitz
+import requests
+from PIL import Image, ImageEnhance, ImageOps
 
 try:
     import pytesseract
@@ -238,25 +240,114 @@ def detect_roll_number(gray):
     return (roll if "?" not in roll else None, digits, confidence, scores_all)
 
 
+# TrOCR API configuration
+TROCR_API_URL = os.environ.get("TROCR_API_URL", "").strip()
+TROCR_API_TOKEN = os.environ.get("TROCR_API_TOKEN", "").strip()
+
+
 def detect_student_name(img):
-    if pytesseract is None:
-        return None
+    """
+    Extract the printed-template name area, apply the
+    successful Colab TrOCR preprocessing, and send it
+    to the remote TrOCR API.
+    """
     try:
         h, w = img.shape[:2]
-        x1, x2 = int(w * 18 / W_MM), int(w * 108 / W_MM)
-        y1, y2 = int(h * 30 / H_MM), int(h * 39 / H_MM)
+
+        # Name area based on the FJMC A4 template
+        x1 = int(w * 18 / W_MM)
+        x2 = int(w * 108 / W_MM)
+        y1 = int(h * 30 / H_MM)
+        y2 = int(h * 39 / H_MM)
+
         crop = img[y1:y2, x1:x2]
+
         if crop.size == 0:
             return None
-        crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        text = pytesseract.image_to_string(gray, config="--psm 7")
-        text = re.sub(r"[^A-Za-z .'-]", "", text).strip(" .-' ")
-        text = re.sub(r"(?i)^name\s*:?\s*", "", text).strip()
-        return text[:80] or None if len(re.sub(r"[^A-Za-z]", "", text)) >= 3 else None
-    except Exception:
+
+        # OpenCV BGR -> RGB -> PIL
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb)
+
+        # Same preprocessing that correctly read RAHUL FOGAT
+        width, height = pil_img.size
+
+        crop_left = int(width * 0.065)
+        pil_img = pil_img.crop(
+            (crop_left, 0, width, height)
+        )
+
+        pil_img = pil_img.resize(
+            (pil_img.width * 3, pil_img.height * 3),
+            Image.Resampling.LANCZOS
+        )
+
+        pil_img = ImageEnhance.Contrast(pil_img).enhance(2.0)
+        pil_img = ImageEnhance.Sharpness(pil_img).enhance(2.0)
+
+        pil_img = ImageOps.expand(
+            pil_img, border=60, fill="white"
+        )
+
+        # Encode processed image
+        buffer = BytesIO()
+        pil_img.save(buffer, format="JPEG", quality=95)
+        image_bytes = buffer.getvalue()
+
+        # Send to Colab TrOCR API
+        if TROCR_API_URL:
+            headers = {}
+            if TROCR_API_TOKEN:
+                headers["Authorization"] = (
+                    f"Bearer {TROCR_API_TOKEN}"
+                )
+
+            response = requests.post(
+                TROCR_API_URL.rstrip("/") + "/ocr",
+                headers=headers,
+                files={
+                    "file": (
+                        "student-name.jpg",
+                        image_bytes,
+                        "image/jpeg"
+                    )
+                },
+                timeout=30
+            )
+
+            response.raise_for_status()
+            data = response.json()
+
+            text = str(data.get("text", "")).strip()
+            text = re.sub(r"[^A-Za-z .'-]", "", text)
+            text = re.sub(r"\s+", " ", text).strip(" .-'")
+
+            return text[:80] if len(
+                re.sub(r"[^A-Za-z]", "", text)
+            ) >= 3 else None
+
+        # Fallback when remote TrOCR is not configured
+        if pytesseract is not None:
+            gray = cv2.cvtColor(
+                np.array(pil_img), cv2.COLOR_RGB2GRAY
+            )
+            text = pytesseract.image_to_string(
+                gray, config="--psm 7"
+            )
+            text = re.sub(r"[^A-Za-z .'-]", "", text)
+            text = re.sub(r"\s+", " ", text).strip()
+
+            return text[:80] if len(
+                re.sub(r"[^A-Za-z]", "", text)
+            ) >= 3 else None
+
         return None
+
+    except Exception as exc:
+        print("[TrOCR] Name recognition failed:", str(exc))
+        return None
+
+
 
 def detect_answer_bubble(gray, cx, cy, scale):
     # Measure only the central fill area.
