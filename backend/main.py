@@ -197,6 +197,31 @@ def read_image(data: bytes, filename: str):
         raise HTTPException(400, "Could not read image. Use JPG, PNG or PDF.")
     yield img
 
+def prepare_uploaded_page(img):
+    """
+    Apply mobile-photo correction before existing OMR scoring.
+    """
+    ok, encoded = cv2.imencode(".jpg", img)
+
+    if not ok:
+        raise HTTPException(400, "Could not prepare uploaded image.")
+
+    prepared = prepare_mobile_photo(encoded.tobytes())
+
+    corrected = cv2.imdecode(
+        np.frombuffer(prepared["image_bytes"], dtype=np.uint8),
+        cv2.IMREAD_COLOR
+    )
+
+    if corrected is None:
+        raise HTTPException(400, "Could not decode corrected image.")
+
+    return corrected, {
+        "page_detected": prepared["page_detected"],
+        "quality": prepared["quality"],
+        "warnings": prepared["warnings"],
+        "needs_review": prepared["needs_review"]
+    }
 
 def normalize_page(img):
     """Resize to template proportions. This does not correct perspective/cropping."""
@@ -463,41 +488,212 @@ def save_page_artifacts(img, result):
     result["scanned_at"] = stamp
 
 
+
 @app.post("/api/scan")
-async def scan(files: list[UploadFile] = File(...), answer_key: str = Form(...), marks: float = Form(1), negative: float = Form(0)):
-    key = "".join(ch for ch in answer_key.upper() if ch in OPTIONS)
+async def scan(
+    files: list[UploadFile] = File(...),
+    answer_key: str = Form(...),
+    marks: float = Form(1),
+    negative: float = Form(0)
+):
+    # Validate answer key
+    key = "".join(
+        ch for ch in answer_key.upper()
+        if ch in OPTIONS
+    )
+
     if not 25 <= len(key) <= 200:
-        raise HTTPException(400, "Answer key must contain 25–200 A/B/C/D letters.")
+        raise HTTPException(
+            400,
+            "Answer key must contain 25–200 A/B/C/D letters."
+        )
+
     if marks < 0 or negative < 0:
-        raise HTTPException(400, "Marks cannot be negative.")
+        raise HTTPException(
+            400,
+            "Marks cannot be negative."
+        )
+
     if not files:
-        raise HTTPException(400, "Upload at least one image or PDF.")
-    results, total_bytes = [], 0
-    batch_dir = Path(tempfile.mkdtemp(prefix="omr-batch-", dir=str(DATA_DIR)))
+        raise HTTPException(
+            400,
+            "Upload at least one image or PDF."
+        )
+
+    results = []
+    total_bytes = 0
+
+    batch_dir = Path(
+        tempfile.mkdtemp(
+            prefix="omr-batch-",
+            dir=str(DATA_DIR)
+        )
+    )
+
     try:
         index = 0
+
         for file in files:
+
             data = await file.read()
             total_bytes += len(data)
+
             if total_bytes > 100 * 1024 * 1024:
-                raise HTTPException(413, "Combined upload limit is 100 MB.")
-            for page_index, img in enumerate(read_image(data, file.filename or "upload.jpg"), 1):
+                raise HTTPException(
+                    413,
+                    "Combined upload limit is 100 MB."
+                )
+
+            filename = (
+                file.filename or "upload.jpg"
+            ).lower()
+
+            for page_index, img in enumerate(
+                read_image(
+                    data,
+                    filename
+                ),
+                1
+            ):
+
                 index += 1
+
                 if index > 1000:
-                    raise HTTPException(400, "Maximum 1000 sheets per batch.")
-                temp_path = batch_dir / f"page-{index:04d}.jpg"
-                cv2.imwrite(str(temp_path), img)
-                result = score_page(img, key, marks, negative)
-                result.update({"page": index, "source_page": page_index, "filename": file.filename or "upload", "paper_title": "FJMC Academy Test", "_temp_path": str(temp_path)})
+                    raise HTTPException(
+                        400,
+                        "Maximum 1000 sheets per batch."
+                    )
+
+                # ---------------------------------
+                # STEP 1: MOBILE PHOTO CORRECTION
+                # ---------------------------------
+
+                if not filename.endswith(".pdf"):
+
+                    img, photo_info = prepare_uploaded_page(img)
+
+                else:
+                    photo_info = {
+                        "page_detected": None,
+                        "quality": {},
+                        "warnings": [],
+                        "needs_review": False
+                    }
+
+                # ---------------------------------
+                # STEP 2: SAVE CORRECTED IMAGE
+                # ---------------------------------
+
+                temp_path = (
+                    batch_dir /
+                    f"page-{index:04d}.jpg"
+                )
+
+                saved = cv2.imwrite(
+                    str(temp_path),
+                    img
+                )
+
+                if not saved:
+                    raise HTTPException(
+                        500,
+                        "Could not save processed OMR image."
+                    )
+
+                # ---------------------------------
+                # STEP 3: EXISTING OMR SCORING
+                # ---------------------------------
+
+                result = score_page(
+                    img,
+                    key,
+                    marks,
+                    negative
+                )
+
+                # ---------------------------------
+                # STEP 4: PHOTO QUALITY INFORMATION
+                # ---------------------------------
+
+                result["photo_quality"] = (
+                    photo_info["quality"]
+                )
+
+                result["photo_warnings"] = (
+                    photo_info["warnings"]
+                )
+
+                result["page_detected"] = (
+                    photo_info["page_detected"]
+                )
+
+                if photo_info["needs_review"]:
+                    result["review_required"] = True
+
+                if photo_info["page_detected"] is False:
+                    result["review_required"] = True
+
+                # ---------------------------------
+                # STEP 5: RESULT METADATA
+                # ---------------------------------
+
+                result.update({
+                    "page": index,
+                    "source_page": page_index,
+                    "filename": file.filename or "upload",
+                    "paper_title": "FJMC Academy Test",
+                    "_temp_path": str(temp_path)
+                })
+
                 results.append(result)
+
+        # ---------------------------------
+        # STEP 6: RANKING
+        # ---------------------------------
+
         ranked = dense_rank(results)
+
+        # ---------------------------------
+        # STEP 7: SAVE PDF AND RESULTS
+        # ---------------------------------
+
         for result in ranked:
-            img = cv2.imread(result.pop("_temp_path"))
-            save_page_artifacts(img, result)
+
+            img_path = result.pop("_temp_path")
+
+            processed_img = cv2.imread(
+                img_path
+            )
+
+            if processed_img is None:
+                raise HTTPException(
+                    500,
+                    "Could not read processed OMR image."
+                )
+
+            save_page_artifacts(
+                processed_img,
+                result
+            )
+
             save_result(result)
-        return {"results": ranked, "count": len(ranked), "storage": "persistent-directory-configurable"}
+
+        # ---------------------------------
+        # STEP 8: API RESPONSE
+        # ---------------------------------
+
+        return {
+            "results": ranked,
+            "count": len(ranked),
+            "storage": "persistent-directory-configurable"
+        }
+
     finally:
-        shutil.rmtree(batch_dir, ignore_errors=True)
+        shutil.rmtree(
+            batch_dir,
+            ignore_errors=True
+        )
+
 
 
 @app.get("/api/results")
