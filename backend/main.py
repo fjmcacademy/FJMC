@@ -1,4 +1,4 @@
-
+from image_pipeline import prepare_mobile_photo
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
