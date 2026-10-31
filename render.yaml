@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: fjmc-smart-omr
-    runtime: docker
-    plan: free
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    healthCheckPath: /api/health
