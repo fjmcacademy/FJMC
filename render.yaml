@@ -1,1 +1,9 @@
-
+services:
+  - type: web
+    name: fjmc-smart-omr
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
