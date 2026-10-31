@@ -5,11 +5,11 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from io import BytesIO
 import json, csv, os, re, datetime, tempfile, shutil
+import requests
 import cv2
 import numpy as np
 import fitz
-import requests
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageEnhance
 
 try:
     import pytesseract
@@ -39,6 +39,9 @@ RESULTS_FILE = DATA_DIR / "results.json"
 W_MM, H_MM = 210.0, 297.0
 IMG_W, IMG_H = 1240, 1754
 OPTIONS = "ABCD"
+TROCR_API_URL = os.environ.get("TROCR_API_URL", "").strip().rstrip("/")
+TROCR_API_TOKEN = os.environ.get("TROCR_API_TOKEN", "").strip()
+
 
 
 def load_saved_results():
@@ -197,31 +200,102 @@ def read_image(data: bytes, filename: str):
         raise HTTPException(400, "Could not read image. Use JPG, PNG or PDF.")
     yield img
 
+
+def _find_marker_center(gray, corner):
+    """Find one printed black square inside a restricted sheet-corner ROI."""
+    h, w = gray.shape[:2]
+    rx = int(w * 0.22)
+    ry = int(h * 0.22)
+    if corner == "tl":
+        x1, y1, x2, y2 = 0, 0, rx, ry
+    elif corner == "tr":
+        x1, y1, x2, y2 = w-rx, 0, w, ry
+    elif corner == "br":
+        x1, y1, x2, y2 = w-rx, h-ry, w, h
+    else:
+        x1, y1, x2, y2 = 0, h-ry, rx, h
+    roi = gray[y1:y2, x1:x2]
+    if roi.size == 0:
+        return None
+    # Adaptive threshold tolerates mildly uneven lighting while keeping the
+    # solid printed corner squares distinct from thin text and bubble rings.
+    bw = cv2.adaptiveThreshold(roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                               cv2.THRESH_BINARY_INV, 31, 12)
+    contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+    expected_x = (0.055 if corner in ("tl", "bl") else 0.945) * w - x1
+    expected_y = (0.039 if corner in ("tl", "tr") else 0.961) * h - y1
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < 100 or area > (w*h*0.002):
+            continue
+        x, y, cw, ch = cv2.boundingRect(c)
+        ratio = cw / float(max(ch, 1))
+        fill = area / float(max(cw*ch, 1))
+        if not (0.65 <= ratio <= 1.45 and fill >= 0.55):
+            continue
+        cx, cy = x + cw/2, y + ch/2
+        # Favor the known marker position, not merely the largest dark blob.
+        dist = ((cx-expected_x)/(0.12*w))**2 + ((cy-expected_y)/(0.12*h))**2
+        candidates.append((dist, (cx+x1, cy+y1)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda z: z[0])
+    if candidates[0][0] > 2.0:
+        return None
+    return candidates[0][1]
+
+
+def align_fjmc_markers(img):
+    """Perspective-align the four FJMC printed corner squares when visible."""
+    if img is None or img.size == 0:
+        return img, False
+    # Work with a portrait page. Generic page normalization has already run.
+    if img.shape[1] > img.shape[0]:
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    names = ("tl", "tr", "br", "bl")
+    found = [_find_marker_center(gray, name) for name in names]
+    if any(point is None for point in found):
+        return cv2.resize(img, (IMG_W, IMG_H), interpolation=cv2.INTER_CUBIC), False
+    src = np.asarray(found, dtype=np.float32)
+    # Marker centres from the exact PDF template: x=11.5/198.5 mm,
+    # y=11.5/285.5 mm. Mapping centres corrects skew without changing layout.
+    dst = np.asarray([
+        [11.5/W_MM*IMG_W, 11.5/H_MM*IMG_H],
+        [198.5/W_MM*IMG_W, 11.5/H_MM*IMG_H],
+        [198.5/W_MM*IMG_W, 285.5/H_MM*IMG_H],
+        [11.5/W_MM*IMG_W, 285.5/H_MM*IMG_H],
+    ], dtype=np.float32)
+    matrix = cv2.getPerspectiveTransform(src, dst)
+    aligned = cv2.warpPerspective(img, matrix, (IMG_W, IMG_H),
+                                  flags=cv2.INTER_CUBIC,
+                                  borderMode=cv2.BORDER_REPLICATE)
+    return aligned, True
+
+
 def prepare_uploaded_page(img):
-    """
-    Apply mobile-photo correction before existing OMR scoring.
-    """
-    ok, encoded = cv2.imencode(".jpg", img)
-
+    """Run generic photo cleanup, then precise FJMC-marker alignment."""
+    ok, encoded = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 94])
     if not ok:
-        raise HTTPException(400, "Could not prepare uploaded image.")
-
+        raise ValueError("Could not encode uploaded page")
     prepared = prepare_mobile_photo(encoded.tobytes())
-
-    corrected = cv2.imdecode(
-        np.frombuffer(prepared["image_bytes"], dtype=np.uint8),
-        cv2.IMREAD_COLOR
-    )
-
+    corrected = cv2.imdecode(np.frombuffer(prepared["image_bytes"], np.uint8), cv2.IMREAD_COLOR)
     if corrected is None:
-        raise HTTPException(400, "Could not decode corrected image.")
-
+        raise ValueError("Image preparation returned invalid image data")
+    corrected, markers_found = align_fjmc_markers(corrected)
+    warnings = list(prepared.get("warnings") or [])
+    if not markers_found:
+        warnings.append("FJMC corner markers not all detected; check page alignment and preview.")
+    quality = dict(prepared.get("quality") or {})
     return corrected, {
-        "page_detected": prepared["page_detected"],
-        "quality": prepared["quality"],
-        "warnings": prepared["warnings"],
-        "needs_review": prepared["needs_review"]
+        "page_detected": bool(prepared.get("page_detected")),
+        "markers_detected": markers_found,
+        "quality": quality,
+        "warnings": list(dict.fromkeys(warnings)),
+        "needs_review": bool(prepared.get("needs_review") or not markers_found),
     }
+
 
 def normalize_page(img):
     """Resize to template proportions. This does not correct perspective/cropping."""
@@ -265,114 +339,51 @@ def detect_roll_number(gray):
     return (roll if "?" not in roll else None, digits, confidence, scores_all)
 
 
-# TrOCR API configuration
-TROCR_API_URL = os.environ.get("TROCR_API_URL", "").strip()
-TROCR_API_TOKEN = os.environ.get("TROCR_API_TOKEN", "").strip()
-
-
 def detect_student_name(img):
-    """
-    Extract the printed-template name area, apply the
-    successful Colab TrOCR preprocessing, and send it
-    to the remote TrOCR API.
-    """
+    """Read the handwritten name using remote TrOCR, then local Tesseract fallback."""
     try:
         h, w = img.shape[:2]
-
-        # Name area based on the FJMC A4 template
-        x1 = int(w * 18 / W_MM)
-        x2 = int(w * 108 / W_MM)
-        y1 = int(h * 30 / H_MM)
-        y2 = int(h * 39 / H_MM)
-
+        x1, x2 = int(w * 18 / W_MM), int(w * 108 / W_MM)
+        y1, y2 = int(h * 30 / H_MM), int(h * 39 / H_MM)
         crop = img[y1:y2, x1:x2]
-
         if crop.size == 0:
             return None
-
-        # OpenCV BGR -> RGB -> PIL
-        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb)
-
-        # Same preprocessing that correctly read RAHUL FOGAT
-        width, height = pil_img.size
-
-        crop_left = int(width * 0.065)
-        pil_img = pil_img.crop(
-            (crop_left, 0, width, height)
-        )
-
-        pil_img = pil_img.resize(
-            (pil_img.width * 3, pil_img.height * 3),
-            Image.Resampling.LANCZOS
-        )
-
-        pil_img = ImageEnhance.Contrast(pil_img).enhance(2.0)
-        pil_img = ImageEnhance.Sharpness(pil_img).enhance(2.0)
-
-        pil_img = ImageOps.expand(
-            pil_img, border=60, fill="white"
-        )
-
-        # Encode processed image
-        buffer = BytesIO()
-        pil_img.save(buffer, format="JPEG", quality=95)
-        image_bytes = buffer.getvalue()
-
-        # Send to Colab TrOCR API
+        # TrOCR works better with a clean, enlarged crop and white padding.
+        pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        pil = pil.resize((max(1, pil.width*3), max(1, pil.height*3)), Image.Resampling.LANCZOS)
+        pil = ImageEnhance.Contrast(pil).enhance(2.0)
+        pil = ImageEnhance.Sharpness(pil).enhance(2.0)
+        canvas_img = Image.new("RGB", (pil.width+120, pil.height+120), "white")
+        canvas_img.paste(pil, (60, 60))
+        buf = BytesIO()
+        canvas_img.save(buf, format="JPEG", quality=95)
+        crop_bytes = buf.getvalue()
         if TROCR_API_URL:
-            headers = {}
-            if TROCR_API_TOKEN:
-                headers["Authorization"] = (
-                    f"Bearer {TROCR_API_TOKEN}"
-                )
-
-            response = requests.post(
-                TROCR_API_URL.rstrip("/") + "/ocr",
-                headers=headers,
-                files={
-                    "file": (
-                        "student-name.jpg",
-                        image_bytes,
-                        "image/jpeg"
-                    )
-                },
-                timeout=30
-            )
-
+            headers = {"Authorization": f"Bearer {TROCR_API_TOKEN}"} if TROCR_API_TOKEN else {}
+            response = requests.post(TROCR_API_URL + "/ocr", headers=headers,
+                                     files={"file": ("name.jpg", crop_bytes, "image/jpeg")}, timeout=25)
             response.raise_for_status()
             data = response.json()
-
-            text = str(data.get("text", "")).strip()
-            text = re.sub(r"[^A-Za-z .'-]", "", text)
-            text = re.sub(r"\s+", " ", text).strip(" .-'")
-
-            return text[:80] if len(
-                re.sub(r"[^A-Za-z]", "", text)
-            ) >= 3 else None
-
-        # Fallback when remote TrOCR is not configured
-        if pytesseract is not None:
-            gray = cv2.cvtColor(
-                np.array(pil_img), cv2.COLOR_RGB2GRAY
-            )
-            text = pytesseract.image_to_string(
-                gray, config="--psm 7"
-            )
-            text = re.sub(r"[^A-Za-z .'-]", "", text)
-            text = re.sub(r"\s+", " ", text).strip()
-
-            return text[:80] if len(
-                re.sub(r"[^A-Za-z]", "", text)
-            ) >= 3 else None
-
-        return None
-
+            raw = data.get("text") or data.get("generated_text") or data.get("prediction") or ""
+            text = str(raw)
+            text = re.sub(r"[^A-Za-z .'-]", "", text).strip(" .-' ")
+            text = re.sub(r"(?i)^name\s*: ?", "", text).strip()
+            if len(re.sub(r"[^A-Za-z]", "", text)) >= 3:
+                return text[:80]
     except Exception as exc:
-        print("[TrOCR] Name recognition failed:", str(exc))
+        print(f"TrOCR name read failed: {exc}")
+    if pytesseract is None:
         return None
-
-
+    try:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        text = pytesseract.image_to_string(gray, config="--psm 7")
+        text = re.sub(r"[^A-Za-z .'-]", "", text).strip(" .-' ")
+        text = re.sub(r"(?i)^name\s*: ?", "", text).strip()
+        return text[:80] if len(re.sub(r"[^A-Za-z]", "", text)) >= 3 else None
+    except Exception:
+        return None
 
 def detect_answer_bubble(gray, cx, cy, scale):
     # Measure only the central fill area.
@@ -488,212 +499,55 @@ def save_page_artifacts(img, result):
     result["scanned_at"] = stamp
 
 
-
 @app.post("/api/scan")
-async def scan(
-    files: list[UploadFile] = File(...),
-    answer_key: str = Form(...),
-    marks: float = Form(1),
-    negative: float = Form(0)
-):
-    # Validate answer key
-    key = "".join(
-        ch for ch in answer_key.upper()
-        if ch in OPTIONS
-    )
-
+async def scan(files: list[UploadFile] = File(...), answer_key: str = Form(...), marks: float = Form(1), negative: float = Form(0)):
+    key = "".join(ch for ch in answer_key.upper() if ch in OPTIONS)
     if not 25 <= len(key) <= 200:
-        raise HTTPException(
-            400,
-            "Answer key must contain 25–200 A/B/C/D letters."
-        )
-
+        raise HTTPException(400, "Answer key must contain 25–200 A/B/C/D letters.")
     if marks < 0 or negative < 0:
-        raise HTTPException(
-            400,
-            "Marks cannot be negative."
-        )
-
+        raise HTTPException(400, "Marks cannot be negative.")
     if not files:
-        raise HTTPException(
-            400,
-            "Upload at least one image or PDF."
-        )
-
-    results = []
-    total_bytes = 0
-
-    batch_dir = Path(
-        tempfile.mkdtemp(
-            prefix="omr-batch-",
-            dir=str(DATA_DIR)
-        )
-    )
-
+        raise HTTPException(400, "Upload at least one image or PDF.")
+    results, total_bytes = [], 0
+    batch_dir = Path(tempfile.mkdtemp(prefix="omr-batch-", dir=str(DATA_DIR)))
     try:
         index = 0
-
         for file in files:
-
             data = await file.read()
             total_bytes += len(data)
-
             if total_bytes > 100 * 1024 * 1024:
-                raise HTTPException(
-                    413,
-                    "Combined upload limit is 100 MB."
-                )
-
-            filename = (
-                file.filename or "upload.jpg"
-            ).lower()
-
-            for page_index, img in enumerate(
-                read_image(
-                    data,
-                    filename
-                ),
-                1
-            ):
-
+                raise HTTPException(413, "Combined upload limit is 100 MB.")
+            for page_index, img in enumerate(read_image(data, file.filename or "upload.jpg"), 1):
                 index += 1
-
                 if index > 1000:
-                    raise HTTPException(
-                        400,
-                        "Maximum 1000 sheets per batch."
-                    )
-
-                # ---------------------------------
-                # STEP 1: MOBILE PHOTO CORRECTION
-                # ---------------------------------
-
-                if not filename.endswith(".pdf"):
-
-                    img, photo_info = prepare_uploaded_page(img)
-
-                else:
-                    photo_info = {
-                        "page_detected": None,
-                        "quality": {},
-                        "warnings": [],
-                        "needs_review": False
-                    }
-
-                # ---------------------------------
-                # STEP 2: SAVE CORRECTED IMAGE
-                # ---------------------------------
-
-                temp_path = (
-                    batch_dir /
-                    f"page-{index:04d}.jpg"
-                )
-
-                saved = cv2.imwrite(
-                    str(temp_path),
-                    img
-                )
-
-                if not saved:
-                    raise HTTPException(
-                        500,
-                        "Could not save processed OMR image."
-                    )
-
-                # ---------------------------------
-                # STEP 3: EXISTING OMR SCORING
-                # ---------------------------------
-
-                result = score_page(
-                    img,
-                    key,
-                    marks,
-                    negative
-                )
-
-                # ---------------------------------
-                # STEP 4: PHOTO QUALITY INFORMATION
-                # ---------------------------------
-
-                result["photo_quality"] = (
-                    photo_info["quality"]
-                )
-
-                result["photo_warnings"] = (
-                    photo_info["warnings"]
-                )
-
-                result["page_detected"] = (
-                    photo_info["page_detected"]
-                )
-
-                if photo_info["needs_review"]:
-                    result["review_required"] = True
-
-                if photo_info["page_detected"] is False:
-                    result["review_required"] = True
-
-                # ---------------------------------
-                # STEP 5: RESULT METADATA
-                # ---------------------------------
-
+                    raise HTTPException(400, "Maximum 1000 sheets per batch.")
+                temp_path = batch_dir / f"page-{index:04d}.jpg"
+                try:
+                    corrected, photo_info = prepare_uploaded_page(img)
+                except Exception as exc:
+                    raise HTTPException(422, f"Could not prepare page {index}: {exc}")
+                cv2.imwrite(str(temp_path), corrected, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                result = score_page(corrected, key, marks, negative)
                 result.update({
-                    "page": index,
-                    "source_page": page_index,
+                    "page": index, "source_page": page_index,
                     "filename": file.filename or "upload",
                     "paper_title": "FJMC Academy Test",
+                    "page_detected": photo_info["page_detected"],
+                    "markers_detected": photo_info["markers_detected"],
+                    "photo_quality": photo_info["quality"],
+                    "photo_warnings": photo_info["warnings"],
                     "_temp_path": str(temp_path)
                 })
-
+                result["review_required"] = bool(result.get("review_required") or photo_info["needs_review"])
                 results.append(result)
-
-        # ---------------------------------
-        # STEP 6: RANKING
-        # ---------------------------------
-
         ranked = dense_rank(results)
-
-        # ---------------------------------
-        # STEP 7: SAVE PDF AND RESULTS
-        # ---------------------------------
-
         for result in ranked:
-
-            img_path = result.pop("_temp_path")
-
-            processed_img = cv2.imread(
-                img_path
-            )
-
-            if processed_img is None:
-                raise HTTPException(
-                    500,
-                    "Could not read processed OMR image."
-                )
-
-            save_page_artifacts(
-                processed_img,
-                result
-            )
-
+            img = cv2.imread(result.pop("_temp_path"))
+            save_page_artifacts(img, result)
             save_result(result)
-
-        # ---------------------------------
-        # STEP 8: API RESPONSE
-        # ---------------------------------
-
-        return {
-            "results": ranked,
-            "count": len(ranked),
-            "storage": "persistent-directory-configurable"
-        }
-
+        return {"results": ranked, "count": len(ranked), "storage": "persistent-directory-configurable"}
     finally:
-        shutil.rmtree(
-            batch_dir,
-            ignore_errors=True
-        )
-
+        shutil.rmtree(batch_dir, ignore_errors=True)
 
 
 @app.get("/api/results")

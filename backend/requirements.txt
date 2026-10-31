@@ -8,5 +8,4 @@ PyMuPDF>=1.24
 reportlab>=4.0
 pytesseract>=0.3.10
 easyocr
-requests
-Pillow
+requests>=2.31.0
