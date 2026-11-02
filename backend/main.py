@@ -261,10 +261,10 @@ def normalize_page(img):
     # ReportLab mein anchors margin ke andar hain, isliye perfect edge alignment ke liye 
     # exact padding define ki gayi hai taaki bubbles purani calculation par hi baithein.
     dst = np.array([,
-        [IMG_W - 1, 0],
-        [IMG_W - 1, IMG_H - 1],
-        [0, IMG_H - 1]
-    ], dtype="float32")
+    [IMG_W - 1, 0],
+    [IMG_W - 1, IMG_H - 1],
+    [0, IMG_H - 1]
+], dtype="float32")
 
     # 7. Warp Perspective Apply Karein
     M = cv2.getPerspectiveTransform(rect, dst)
