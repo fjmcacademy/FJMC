@@ -196,11 +196,82 @@ def read_image(data: bytes, filename: str):
 
 
 def normalize_page(img):
-    """Resize to template proportions. This does not correct perspective/cropping."""
+    """
+    ReportLab dwara banaye gaye 4 corner anchors (rectangles) ko detect karta hai
+    aur mobile se li gayi tedhi photo ko perfect alignment (Perspective Transform) deta hai.
+    """
     h, w = img.shape[:2]
+    
+    # 1. Orientation Check: Agar landscape hai toh portrait karein
     if w > h:
         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-    return cv2.resize(img, (IMG_W, IMG_H), interpolation=cv2.INTER_CUBIC)
+        h, w = img.shape[:2]
+
+    # 2. Image Pre-processing (Anchors ko highlight karne ke liye)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Adaptive thresholding mobile photo ki uneven lighting ko handle karne ke liye sabse best hai
+    thresh = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY_INV, 11, 2
+    )
+
+    # 3. Contours Find Karein
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    valid_anchors = []
+    img_area = w * h
+
+    for c in contours:
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.03 * peri, True)
+        
+        # OMR ke corners square/rectangular hain (4 corners)
+        if len(approx) == 4:
+            area = cv2.contourArea(c)
+            # Faltu noise ko hatane ke liye area filter (na bohot chota, na bohot bada)
+            if (img_area * 0.0001) < area < (img_area * 0.05):
+                # Anchor ka center point calculate karein
+                M = cv2.moments(c)
+                if M["m00"] != 0:
+                    cX = int(M["m10"] / M["m00"])
+                    cY = int(M["m01"] / M["m00"])
+                    valid_anchors.append((cX, cY))
+
+    # 4. Agar exactly 4 anchors nahi mile, toh raw resize par fallback karein (taaki code crash na ho)
+    if len(valid_anchors) != 4:
+        # Warning print karein ya log karein
+        print(f"[Warning] 4 Anchors nahi mile (Mile: {len(valid_anchors)}). Standard resize apply ho raha hai.")
+        return cv2.resize(img, (IMG_W, IMG_H), interpolation=cv2.INTER_CUBIC)
+
+    # 5. Corners ko sahi Order mein layein: [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
+    pts = np.array(valid_anchors, dtype="float32")
+    rect = np.zeros((4, 2), dtype="float32")
+    
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]   # Top-Left (Sabse chota sum)
+    rect[2] = pts[np.argmax(s)]   # Bottom-Right (Sabse bada sum)
+    
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]  # Top-Right
+    rect[3] = pts[np.argmax(diff)]  # Bottom-Left
+
+    # 6. Target Destinations (Aapke IMG_W=1240 aur IMG_H=1754 ke mutabik)
+    # ReportLab mein anchors margin ke andar hain, isliye perfect edge alignment ke liye 
+    # exact padding define ki gayi hai taaki bubbles purani calculation par hi baithein.
+    dst = np.array([,
+        [IMG_W - 1, 0],
+        [IMG_W - 1, IMG_H - 1],
+        [0, IMG_H - 1]
+    ], dtype="float32")
+
+    # 7. Warp Perspective Apply Karein
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(img, M, (IMG_W, IMG_H))
+    
+    return warped
+
 
 
 def dark_fraction(gray, cx, cy, radius, threshold=150):
